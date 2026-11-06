@@ -3,65 +3,130 @@ declare(strict_types=1);
 
 const TIPOS_PLANEJADOS = "'preventiva','preditiva','inspecao','lubrificacao','calibracao'";
 
-/** Custo total de uma OT em SQL (alias o). */
-const SQL_CUSTO_OT = '(SELECT COALESCE(SUM(horas*custo_hora),0) FROM ot_mao_obra WHERE ot_id=o.id)';
-const SQL_CUSTO_MAT = '(SELECT COALESCE(SUM(quantidade*custo_unitario),0) FROM ot_materiais WHERE ot_id=o.id)';
+/** Custos de uma OT (alias o): colunas desnormalizadas mantidas por recalcular_custos_ot(). Materiais só contam depois de baixados. */
+const SQL_CUSTO_OT  = 'o.custo_mo';
+const SQL_CUSTO_MAT = 'o.custo_mat';
+
+/** Mapa id → id do ativo raiz (topo da árvore). */
+function mapa_raiz(): array
+{
+    static $mapa = null;
+    if ($mapa !== null) return $mapa;
+    $pai = [];
+    foreach (q('SELECT id, parent_id FROM ativos') as $a) $pai[(int)$a['id']] = $a['parent_id'] ? (int)$a['parent_id'] : null;
+    $mapa = [];
+    foreach ($pai as $id => $_) {
+        $r = $id; $g = 0;
+        while ($pai[$r] ?? null) { $r = $pai[$r]; if (++$g > 50) break; }
+        $mapa[$id] = $r;
+    }
+    return $mapa;
+}
+
+/**
+ * Horas de parada no período, unindo intervalos sobrepostos por chave (ex.: ativo raiz ou o próprio ativo)
+ * e recortando pelo período. Cada OT concluída com parada vira o intervalo [data_fim - horas_parada, data_fim].
+ * @return array chave => horas
+ */
+function paradas_no_periodo(string $ini, string $fim, ?array $ids, callable $chave, bool $soCorretiva = false): array
+{
+    $tIni = strtotime("$ini 00:00:00"); $tFim = strtotime("$fim 23:59:59") + 1;
+    $w = $ids ? ' AND ativo_id IN (' . implode(',', array_map('intval', $ids)) . ')' : '';
+    // teto: uma parada que termina depois de fim + maior parada registrada não pode cruzar o período
+    static $maxParada = null;
+    $maxParada ??= (int)ceil((float)qv("SELECT COALESCE(MAX(horas_parada), 0) FROM ordens_trabalho WHERE status = 'concluida'"));
+    $rows = q("SELECT ativo_id, data_fim, horas_parada FROM ordens_trabalho
+               WHERE status = 'concluida' AND horas_parada > 0 AND ativo_id IS NOT NULL" . ($soCorretiva ? " AND tipo = 'corretiva'" : '') . "
+                 AND data_fim >= ? AND data_fim <= ? + INTERVAL $maxParada HOUR
+                 AND DATE_SUB(data_fim, INTERVAL ROUND(horas_parada * 60) MINUTE) <= ? $w",
+              ["$ini 00:00:00", "$fim 23:59:59", "$fim 23:59:59"]);
+    $porChave = [];
+    foreach ($rows as $r) {
+        $k = $chave((int)$r['ativo_id']);
+        if ($k === null) continue;
+        $b = strtotime($r['data_fim']); $a = $b - (int)round((float)$r['horas_parada'] * 3600);
+        $a = max($a, $tIni); $b = min($b, $tFim);
+        if ($b > $a) $porChave[$k][] = [$a, $b];
+    }
+    $res = [];
+    foreach ($porChave as $k => $ints) {
+        usort($ints, fn($x, $y) => $x[0] <=> $y[0]);
+        $tot = 0; [$ca, $cb] = $ints[0];
+        foreach (array_slice($ints, 1) as [$a, $b]) {
+            if ($a <= $cb) { $cb = max($cb, $b); continue; }
+            $tot += $cb - $ca; [$ca, $cb] = [$a, $b];
+        }
+        $res[$k] = ($tot + $cb - $ca) / 3600;
+    }
+    return $res;
+}
 
 /**
  * Indicadores de manutenção para o período [ini, fim] (datas Y-m-d).
- * $filtroAtivos: lista de IDs (null = todos)
+ * $filtroAtivos: [raiz, ...descendentes] (como devolvido por descendentes()), ou null para todos.
  */
 function kpis(string $ini, string $fim, ?array $filtroAtivos = null): array
 {
     $fa = $filtroAtivos ? ' AND o.ativo_id IN (' . implode(',', array_map('intval', $filtroAtivos)) . ')' : '';
-    // base de horas: ativo raiz do filtro (descendentes param junto com ele) ou todos os ativos de 1º nível
-    $faA = $filtroAtivos ? ' AND a.id = ' . (int)$filtroAtivos[0] : ' AND a.parent_id IS NULL';
     $p = [$ini . ' 00:00:00', $fim . ' 23:59:59'];
 
     $k = [];
-    $k['abertas'] = (int)qv("SELECT COUNT(*) FROM ordens_trabalho o WHERE status NOT IN ('concluida','cancelada') $fa");
-    $k['atrasadas'] = (int)qv("SELECT COUNT(*) FROM ordens_trabalho o WHERE status NOT IN ('concluida','cancelada') AND data_prevista < CURDATE() $fa");
+    $ab = q1("SELECT COUNT(*) abertas, COALESCE(SUM(data_prevista < CURDATE()), 0) atrasadas FROM ordens_trabalho o WHERE status IN (" . STATUS_PENDENTES . ") $fa");
+    $k['abertas'] = (int)$ab['abertas']; $k['atrasadas'] = (int)$ab['atrasadas'];
     $k['pedidos_abertos'] = (int)qv("SELECT COUNT(*) FROM pedidos WHERE status = 'aberto'");
 
     $c = q1("SELECT COUNT(*) total,
-               SUM(tipo IN (" . TIPOS_PLANEJADOS . ")) planejadas,
-               SUM(tipo = 'corretiva') corretivas,
-               AVG(CASE WHEN tipo='corretiva' AND data_inicio IS NOT NULL THEN TIMESTAMPDIFF(MINUTE, data_inicio, data_fim)/60 END) mttr,
-               SUM(CASE WHEN tipo='corretiva' THEN horas_parada ELSE 0 END) parada_corr,
-               SUM(horas_parada) parada,
-               SUM(" . SQL_CUSTO_OT . ") c_mo, SUM(" . SQL_CUSTO_MAT . ") c_mat, SUM(custo_externo) c_ext
+               COALESCE(SUM(tipo IN (" . TIPOS_PLANEJADOS . ")), 0) planejadas,
+               COALESCE(SUM(tipo = 'corretiva'), 0) corretivas,
+               AVG(CASE WHEN tipo='corretiva' AND data_inicio IS NOT NULL AND data_fim >= data_inicio THEN TIMESTAMPDIFF(MINUTE, data_inicio, data_fim)/60 END) mttr,
+               COALESCE(SUM(" . SQL_CUSTO_OT . "), 0) c_mo, COALESCE(SUM(" . SQL_CUSTO_MAT . "), 0) c_mat, COALESCE(SUM(custo_externo), 0) c_ext
              FROM ordens_trabalho o WHERE status = 'concluida' AND data_fim BETWEEN ? AND ? $fa", $p);
     $k['concluidas'] = (int)$c['total'];
     $k['corretivas'] = (int)$c['corretivas'];
     $k['planejadas'] = (int)$c['planejadas'];
     $k['pct_planejada'] = $c['total'] ? $c['planejadas'] / $c['total'] * 100 : null;
     $k['mttr'] = $c['mttr'] !== null ? (float)$c['mttr'] : null;
-    $k['horas_parada'] = (float)$c['parada'];
     $k['custo_mo'] = (float)$c['c_mo']; $k['custo_mat'] = (float)$c['c_mat']; $k['custo_ext'] = (float)$c['c_ext'];
     $k['custo_total'] = $k['custo_mo'] + $k['custo_mat'] + $k['custo_ext'];
 
-    // Cumprimento do plano preventivo: OTs planejadas com previsão no período, concluídas até a data prevista
-    $cp = q1("SELECT COUNT(*) prev, SUM(status='concluida' AND DATE(data_fim) <= data_prevista) no_prazo
-              FROM ordens_trabalho o WHERE tipo IN (" . TIPOS_PLANEJADOS . ") AND status <> 'cancelada' AND data_prevista BETWEEN ? AND ? $fa", [$ini, $fim]);
+    // Cumprimento: preventivas previstas no período que já venceram (ou foram concluídas) e foram feitas no prazo
+    $cp = q1("SELECT COUNT(*) prev, COALESCE(SUM(status='concluida' AND DATE(data_fim) <= data_prevista), 0) no_prazo
+              FROM ordens_trabalho o WHERE tipo IN (" . TIPOS_PLANEJADOS . ") AND status <> 'cancelada'
+                AND data_prevista BETWEEN ? AND ? AND (status = 'concluida' OR data_prevista < CURDATE()) $fa", [$ini, $fim]);
     $k['cumprimento'] = $cp['prev'] ? $cp['no_prazo'] / $cp['prev'] * 100 : null;
 
-    // Disponibilidade e MTBF (base: horas de operação/dia dos ativos ativos)
-    $dias = (strtotime($fim) - strtotime($ini)) / 86400 + 1;
-    $horasOp = (float)qv("SELECT COALESCE(SUM(horas_operacao_dia),0) FROM ativos a WHERE a.status <> 'desativado' $faA") * $dias;
+    // Disponibilidade e MTBF: base = ativos raiz (ou o ativo filtrado); paradas de componentes contam
+    // para a raiz, e intervalos sobrepostos (pai e componente parados juntos) são contados uma vez só.
+    $ate = min($fim, date('Y-m-d'));                                   // não conta horas futuras
+    $diasDecorridos = max(0, (strtotime($ate) - strtotime($ini)) / 86400 + 1);
+    if ($filtroAtivos) {
+        $raiz = (int)$filtroAtivos[0];
+        $base = [$raiz => (float)qv("SELECT horas_operacao_dia FROM ativos WHERE id = ? AND status <> 'desativado'", [$raiz])];
+        $chave = fn(int $id) => $raiz;
+    } else {
+        $base = [];
+        foreach (q("SELECT id, horas_operacao_dia FROM ativos WHERE parent_id IS NULL AND status <> 'desativado'") as $a) $base[(int)$a['id']] = (float)$a['horas_operacao_dia'];
+        $mapa = mapa_raiz();
+        $chave = fn(int $id) => isset($base[$mapa[$id] ?? 0]) ? $mapa[$id] : null;
+    }
+    $horasOp = array_sum($base) * $diasDecorridos;
+    $parada = $diasDecorridos > 0 ? array_sum(paradas_no_periodo($ini, $ate, $filtroAtivos, $chave)) : 0;
+    $paradaCorr = $diasDecorridos > 0 ? array_sum(paradas_no_periodo($ini, $ate, $filtroAtivos, $chave, true)) : 0;
     $k['horas_operacao'] = $horasOp;
-    $k['disponibilidade'] = $horasOp > 0 ? max(0, ($horasOp - $k['horas_parada']) / $horasOp * 100) : null;
-    $k['mtbf'] = $k['corretivas'] > 0 ? ($horasOp - (float)$c['parada_corr']) / $k['corretivas'] : null;
+    $k['horas_parada'] = $horasOp > 0 ? min($parada, $horasOp) : $parada;
+    $k['disponibilidade'] = $horasOp > 0 ? max(0, min(100, ($horasOp - $parada) / $horasOp * 100)) : null;
+    $k['mtbf'] = $k['corretivas'] > 0 && $horasOp > 0 ? max(0, ($horasOp - $paradaCorr) / $k['corretivas']) : null;
     return $k;
 }
 
-/** Série mensal (últimos N meses até $fim) de OTs concluídas por grupo e custo. */
+/** Série mensal (N meses terminando no mês de $fim) de OTs concluídas por grupo e custo. */
 function serie_mensal(string $fim, int $meses = 12): array
 {
-    $ini = date('Y-m-01', strtotime("$fim -" . ($meses - 1) . ' months'));
+    $ini = date('Y-m-01', strtotime(date('Y-m-01', strtotime($fim)) . ' -' . ($meses - 1) . ' months'));
     $rows = q("SELECT DATE_FORMAT(data_fim,'%Y-%m') m,
                  SUM(tipo='corretiva') corr, SUM(tipo IN (" . TIPOS_PLANEJADOS . ")) plan, SUM(tipo='melhoria') melh,
                  SUM(" . SQL_CUSTO_OT . " + " . SQL_CUSTO_MAT . " + custo_externo) custo
-               FROM ordens_trabalho o WHERE status='concluida' AND data_fim BETWEEN ? AND ? GROUP BY m", [$ini, "$fim 23:59:59"]);
+               FROM ordens_trabalho o WHERE status='concluida' AND data_fim BETWEEN ? AND ? GROUP BY DATE_FORMAT(data_fim,'%Y-%m')", [$ini, "$fim 23:59:59"]);
     $idx = array_column($rows, null, 'm');
     $out = ['labels' => [], 'corr' => [], 'plan' => [], 'melh' => [], 'custo' => []];
     $mesesPt = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];

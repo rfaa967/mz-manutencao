@@ -1,20 +1,18 @@
 <?php
 if (usuario()) redirect('dashboard');
 
-$_SESSION['tentativas'] = $_SESSION['tentativas'] ?? [];
-$_SESSION['tentativas'] = array_filter($_SESSION['tentativas'], fn($t) => $t > time() - 900);
-$bloqueado = count($_SESSION['tentativas']) >= 8;
-
 $erro = '';
 if (is_post()) {
-    if ($bloqueado) {
-        $erro = 'Muitas tentativas. Aguarde 15 minutos.';
-    } elseif (login((string)post('email'), (string)post('senha'))) {
-        unset($_SESSION['tentativas']);
+    $erro = login((string)post('email'), (string)post('senha'));
+    if ($erro === null) {
+        $dest = $_SESSION['destino'] ?? null; unset($_SESSION['destino']);
+        if (is_array($dest) && isset($dest['r']) && preg_match('#^[a-z_]+(/[a-z_]+)?$#', (string)$dest['r']) && !str_starts_with((string)$dest['r'], 'logout')) {
+            $r = (string)$dest['r']; unset($dest['r']);
+            redirect($r, array_filter($dest, 'is_scalar'));
+        }
+        $celular = (bool)preg_match('/Android|iPhone|iPod|Mobile/i', $_SERVER['HTTP_USER_AGENT'] ?? '');
+        if ($celular && in_array(usuario()['perfil'], ['tecnico', 'solicitante'], true)) redirect('m');
         redirect(usuario()['perfil'] === 'solicitante' ? 'pedidos' : 'dashboard');
-    } else {
-        $_SESSION['tentativas'][] = time();
-        $erro = 'E-mail ou senha inválidos.';
     }
 }
 

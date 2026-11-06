@@ -43,3 +43,17 @@ document.addEventListener('change', function (ev) {
   fd.append('concluida', cb.checked ? '1' : '0');
   fetch(cb.dataset.url, { method: 'POST', body: fd }).then(r => r.ok || alert('Falha ao salvar a tarefa'));
 });
+
+// Acessibilidade: liga cada <label class="form-label"> sem "for" ao primeiro campo do mesmo bloco
+document.addEventListener('DOMContentLoaded', function () {
+  var n = 0;
+  document.querySelectorAll('label.form-label:not([for])').forEach(function (lb) {
+    var campo = lb.parentElement && lb.parentElement.querySelector('input:not([type=hidden]),select,textarea');
+    if (!campo) return;
+    if (!campo.id) campo.id = 'campo_auto_' + (++n);
+    lb.htmlFor = campo.id;
+  });
+  document.querySelectorAll('button:not([aria-label])').forEach(function (b) {
+    if (b.textContent.trim() === '' && b.querySelector('.bi-x-lg,.bi-x')) b.setAttribute('aria-label', 'Remover');
+  });
+});

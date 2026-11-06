@@ -12,13 +12,15 @@ $GLOBALS['CFG'] = require $cfgFile;
 
 date_default_timezone_set(cfg('timezone', 'America/Sao_Paulo'));
 error_reporting(E_ALL);
-ini_set('display_errors', cfg('debug') ? '1' : '0');
+ini_set('display_errors', (cfg('debug') && PHP_SAPI === 'cli') ? '1' : '0'); // na web, erros vão só para o log
+ini_set('log_errors', '1');
 
 require APP_ROOT . '/app/helpers.php';
 require APP_ROOT . '/app/auth.php';
 require APP_ROOT . '/app/preventiva.php';
 require APP_ROOT . '/app/estoque.php';
 require APP_ROOT . '/app/kpi.php';
+require APP_ROOT . '/app/email.php';
 
 function cfg(string $chave, $padrao = null)
 {
@@ -30,9 +32,11 @@ function cfg(string $chave, $padrao = null)
     return $v;
 }
 
+function db_conectado(): bool { return isset($GLOBALS['__pdo']); }
+
 function db(): PDO
 {
-    static $pdo = null;
+    $pdo = &$GLOBALS['__pdo'];
     if ($pdo === null) {
         $d = cfg('db');
         $dsn = sprintf('mysql:host=%s;port=%d;dbname=%s;charset=%s', $d['host'], $d['port'] ?? 3306, $d['nome'], $d['charset'] ?? 'utf8mb4');

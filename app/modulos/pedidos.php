@@ -6,52 +6,80 @@ function pedido_visivel(array $p): bool { return pode('ver') || (int)$p['solicit
 
 /* ---------- Criar ---------- */
 if ($acao === 'salvar' && is_post()) {
-    $titulo = (string)post('titulo');
-    if ($titulo === '') { flash('Descreva o problema no título.', 'danger'); redirect('pedidos/form'); }
+    $titulo = mb_substr((string)post('titulo'), 0, 150);
     $ativoId = post_int('ativo_id');
+    $locId = post_int('localizacao_id');
+    $erro = null;
+    if ($titulo === '') $erro = 'Descreva o problema no título.';
+    elseif ($ativoId && !qv("SELECT 1 FROM ativos WHERE id = ? AND status <> 'desativado'", [$ativoId])) $erro = 'Equipamento inválido.';
+    elseif ($locId && !qv('SELECT 1 FROM localizacoes WHERE id = ?', [$locId])) $erro = 'Localização inválida.';
+    if ($erro) { flash($erro, 'danger'); redirect_m('m/pedido', ['ativo' => $ativoId]); redirect('pedidos/form', ['ativo' => $ativoId]); }
     $dados = [
-        'numero' => proximo_numero('pedidos', 'PT'), 'ativo_id' => $ativoId, 'localizacao_id' => post_int('localizacao_id'),
+        'numero' => proximo_numero('pedidos', 'PT'), 'ativo_id' => $ativoId, 'localizacao_id' => $locId,
         'solicitante_id' => $u['id'], 'titulo' => $titulo, 'descricao' => post('descricao') ?: null,
         'prioridade' => array_key_exists((string)post('prioridade'), ROTULOS['prioridade']) ? post('prioridade') : 'media',
         'ativo_parado' => post('ativo_parado') ? 1 : 0,
     ];
     if ($ativoId && !$dados['localizacao_id']) $dados['localizacao_id'] = qv('SELECT localizacao_id FROM ativos WHERE id = ?', [$ativoId]);
     $id = insert('pedidos', $dados);
-    if ($dados['ativo_parado'] && $ativoId) qx("UPDATE ativos SET status = 'parado' WHERE id = ? AND status = 'operacional'", [$ativoId]);
+    // pedidos da equipe já marcam o ativo como parado; os de solicitantes, só após a aprovação
+    atualizar_status_ativo($ativoId);
     auditar('criar', 'pedidos', $id);
-    flash("Pedido {$dados['numero']} registrado. A equipe de manutenção será notificada no painel.");
+    notificar_novo_pedido($id);
+    flash("Pedido {$dados['numero']} registrado. A equipe de manutenção foi avisada.");
+    redirect_m('m/pedidos', ['id' => $id]);
     redirect('pedidos/ver', ['id' => $id]);
 }
 
 /* ---------- Avaliar (aprovar → OT / rejeitar) ---------- */
 if ($acao === 'avaliar' && is_post()) {
     exigir('gerir');
-    $p = q1('SELECT * FROM pedidos WHERE id = ?', [post_int('id')]);
-    if (!$p || !in_array($p['status'], ['aberto', 'aprovado'], true)) { flash('Pedido não pode mais ser avaliado.', 'warning'); redirect('pedidos'); }
-    $decisao = post('decisao');
+    $pid = (int)post_int('id');
+    $decisao = post('decisao') === 'rejeitar' ? 'rejeitar' : 'aprovar';
     $resposta = post('resposta') ?: null;
-    if ($decisao === 'rejeitar') {
-        update('pedidos', ['status' => 'rejeitado', 'resposta' => $resposta, 'avaliado_por' => $u['id'], 'avaliado_em' => date('Y-m-d H:i:s')], (int)$p['id']);
-        auditar('rejeitar', 'pedidos', (int)$p['id']);
-        flash('Pedido rejeitado.', 'info');
-        redirect('pedidos/ver', ['id' => $p['id']]);
-    }
-    // converter em OT
+    $resp = post_int('responsavel_id');
+    if ($resp && !qv('SELECT 1 FROM tecnicos WHERE id = ? AND ativo = 1', [$resp])) { flash('Responsável inválido.', 'danger'); redirect('pedidos/ver', ['id' => $pid]); }
+
+    if ($decisao === 'rejeitar' && mb_strlen(trim((string)$resposta)) < 5) { flash('Para rejeitar, explique o motivo ao solicitante no campo de comentário.', 'danger'); redirect('pedidos/ver', ['id' => $pid]); }
     $pdo = db(); $pdo->beginTransaction();
-    $otId = insert('ordens_trabalho', [
-        'numero' => proximo_numero('ordens_trabalho', 'OT'), 'ativo_id' => $p['ativo_id'], 'pedido_id' => $p['id'],
-        'tipo' => array_key_exists((string)post('tipo'), ROTULOS['tipo_ot']) ? post('tipo') : 'corretiva',
-        'prioridade' => array_key_exists((string)post('prioridade'), ROTULOS['prioridade']) ? post('prioridade') : $p['prioridade'],
-        'status' => post_int('responsavel_id') ? 'planejada' : 'aberta',
-        'titulo' => $p['titulo'], 'descricao' => trim(($p['descricao'] ?? '') . ($resposta ? "\n\n[Gestor] $resposta" : '')),
-        'responsavel_id' => post_int('responsavel_id'), 'data_prevista' => post_date('data_prevista') ?? date('Y-m-d'),
-        'ativo_parado' => $p['ativo_parado'], 'criado_por' => $u['id'],
-    ]);
-    update('pedidos', ['status' => 'convertido', 'ot_id' => $otId, 'resposta' => $resposta, 'avaliado_por' => $u['id'], 'avaliado_em' => date('Y-m-d H:i:s')], (int)$p['id']);
-    $pdo->commit();
-    auditar('converter', 'pedidos', (int)$p['id'], "OT #$otId");
-    flash('Pedido aprovado e convertido em ordem de trabalho.');
-    redirect('ots/ver', ['id' => $otId]);
+    try {
+        // trava o pedido: dois gestores (ou duplo clique) não geram duas OTs
+        $p = q1('SELECT * FROM pedidos WHERE id = ? FOR UPDATE', [$pid]);
+        if (!$p || !in_array($p['status'], ['aberto', 'aprovado'], true)) {
+            $pdo->rollBack();
+            flash('Este pedido já foi avaliado.', 'warning');
+            redirect('pedidos/ver', ['id' => $pid]);
+        }
+        $otId = null;
+        if ($decisao === 'rejeitar') {
+            update('pedidos', ['status' => 'rejeitado', 'resposta' => $resposta, 'avaliado_por' => $u['id'], 'avaliado_em' => date('Y-m-d H:i:s')], $pid);
+        } else {
+            $otId = insert('ordens_trabalho', [
+                'numero' => proximo_numero('ordens_trabalho', 'OT'), 'ativo_id' => $p['ativo_id'], 'pedido_id' => $pid,
+                'tipo' => array_key_exists((string)post('tipo'), ROTULOS['tipo_ot']) ? post('tipo') : 'corretiva',
+                'prioridade' => array_key_exists((string)post('prioridade'), ROTULOS['prioridade']) ? post('prioridade') : $p['prioridade'],
+                'status' => $resp ? 'planejada' : 'aberta',
+                'titulo' => $p['titulo'], 'descricao' => trim(($p['descricao'] ?? '') . ($resposta ? "\n\n[Gestor] $resposta" : '')),
+                'responsavel_id' => $resp, 'data_prevista' => post_date('data_prevista') ?? date('Y-m-d'),
+                'ativo_parado' => $p['ativo_parado'], 'criado_por' => $u['id'],
+            ]);
+            update('pedidos', ['status' => 'convertido', 'ot_id' => $otId, 'resposta' => $resposta, 'avaliado_por' => $u['id'], 'avaliado_em' => date('Y-m-d H:i:s')], $pid);
+        }
+        $pdo->commit();
+    } catch (Throwable $ex) {
+        if ($pdo->inTransaction()) $pdo->rollBack();
+        throw $ex;
+    }
+    atualizar_status_ativo($p['ativo_id'] ? (int)$p['ativo_id'] : null);
+    auditar($otId ? 'converter' : 'rejeitar', 'pedidos', $pid, $otId ? "OT #$otId" : '');
+    notificar_pedido_avaliado($pid);
+    if ($otId) {
+        notificar_ot_atribuida($otId);
+        flash('Pedido aprovado e convertido em ordem de trabalho.');
+        redirect('ots/ver', ['id' => $otId]);
+    }
+    flash('Pedido rejeitado.', 'info');
+    redirect('pedidos/ver', ['id' => $pid]);
 }
 
 /* ---------- Formulário ---------- */
@@ -64,8 +92,8 @@ if ($acao === 'form') {
       <div class="row g-3">
         <div class="col-md-6"><label class="form-label">Equipamento / ativo</label><?= sel('ativo_id', arvore_opcoes('ativos'), $ativoPre ?: null) ?></div>
         <div class="col-md-6"><label class="form-label">Ou localização (se não souber o ativo)</label><?= sel('localizacao_id', arvore_opcoes('localizacoes'), null) ?></div>
-        <div class="col-12"><label class="form-label">O que está acontecendo? *</label><input class="form-control" name="titulo" required maxlength="150" placeholder="Ex.: Compressor fazendo ruído e desarmando"></div>
-        <div class="col-12"><label class="form-label">Detalhes</label><textarea class="form-control" name="descricao" rows="4" placeholder="Quando começou, sintomas, o que já foi tentado…"></textarea></div>
+        <div class="col-12"><label class="form-label">O que está acontecendo? *</label><input class="form-control" name="titulo" required maxlength="150" value="<?= e(old('titulo', '')) ?>" placeholder="Ex.: Compressor fazendo ruído e desarmando"></div>
+        <div class="col-12"><label class="form-label">Detalhes</label><textarea class="form-control" name="descricao" rows="4" placeholder="Quando começou, sintomas, o que já foi tentado…"><?= e(old('descricao', '')) ?></textarea></div>
         <div class="col-md-4"><label class="form-label">Urgência</label><?= sel('prioridade', lista_rotulos('prioridade'), 'media', false) ?></div>
         <div class="col-md-8 d-flex align-items-end"><div class="form-check"><input class="form-check-input" type="checkbox" name="ativo_parado" value="1" id="parado">
           <label class="form-check-label" for="parado">O equipamento está <strong>parado</strong> / sem condições de uso</label></div></div>
@@ -77,7 +105,7 @@ if ($acao === 'form') {
 
 /* ---------- Detalhe ---------- */
 if ($acao === 'ver') {
-    $p = q1('SELECT p.*, a.codigo, a.nome AS ativo, l.nome AS local, us.nome AS solicitante, av.nome AS avaliador, o.numero AS ot_numero, o.status AS ot_status
+    $p = q1('SELECT p.*, a.codigo, a.nome AS ativo, a.localizacao_id AS ativo_localizacao_id, l.nome AS local, us.nome AS solicitante, av.nome AS avaliador, o.numero AS ot_numero, o.status AS ot_status
              FROM pedidos p LEFT JOIN ativos a ON a.id=p.ativo_id LEFT JOIN localizacoes l ON l.id=p.localizacao_id
              JOIN usuarios us ON us.id=p.solicitante_id LEFT JOIN usuarios av ON av.id=p.avaliado_por LEFT JOIN ordens_trabalho o ON o.id=p.ot_id
              WHERE p.id = ?', [(int)get('id')]);
@@ -89,8 +117,8 @@ if ($acao === 'ver') {
         <h2 class="h5"><?= e($p['titulo']) ?></h2>
         <p style="white-space:pre-line"><?= e($p['descricao']) ?></p>
         <table class="table table-sm mb-0">
-          <tr><th class="fw-normal text-muted">Ativo</th><td><?= $p['ativo_id'] ? '<a href="' . e(url('ativos/ver', ['id' => $p['ativo_id']])) . '">' . e($p['codigo'] . ' · ' . $p['ativo']) . '</a>' : '—' ?></td></tr>
-          <tr><th class="fw-normal text-muted">Localização</th><td><?= e(caminho_localizacao($p['localizacao_id'] ? (int)$p['localizacao_id'] : null)) ?></td></tr>
+          <tr><th class="fw-normal text-muted">Ativo</th><td><?= $p['ativo_id'] ? (pode('ver') ? '<a href="' . e(url('ativos/ver', ['id' => $p['ativo_id']])) . '">' . e($p['codigo'] . ' · ' . $p['ativo']) . '</a>' : e($p['codigo'] . ' · ' . $p['ativo'])) : '—' ?></td></tr>
+          <tr><th class="fw-normal text-muted">Localização</th><td><?= e(caminho_localizacao(($p['localizacao_id'] ?: $p['ativo_localizacao_id']) ? (int)($p['localizacao_id'] ?: $p['ativo_localizacao_id']) : null)) ?: '—' ?></td></tr>
           <tr><th class="fw-normal text-muted">Urgência</th><td><?= badge('prioridade', $p['prioridade']) ?> <?= $p['ativo_parado'] ? '<span class="badge text-bg-danger">equipamento parado</span>' : '' ?></td></tr>
           <tr><th class="fw-normal text-muted">Solicitante</th><td><?= e($p['solicitante']) ?> em <?= dt($p['criado_em'], true) ?></td></tr>
           <?php if ($p['avaliado_em']): ?><tr><th class="fw-normal text-muted">Avaliado por</th><td><?= e($p['avaliador']) ?> em <?= dt($p['avaliado_em'], true) ?></td></tr><?php endif; ?>
@@ -108,7 +136,7 @@ if ($acao === 'ver') {
             <div class="col-6"><label class="form-label">Prioridade</label><?= sel('prioridade', lista_rotulos('prioridade'), $p['prioridade'], false) ?></div>
             <div class="col-6"><label class="form-label">Responsável</label><?= sel('responsavel_id', opcoes('SELECT id, nome FROM tecnicos WHERE ativo=1 ORDER BY nome')) ?></div>
             <div class="col-6"><label class="form-label">Data prevista</label><input type="date" class="form-control" name="data_prevista" value="<?= date('Y-m-d') ?>"></div>
-            <div class="col-12"><label class="form-label">Comentário / resposta ao solicitante</label><textarea class="form-control" name="resposta" rows="2"></textarea></div>
+            <div class="col-12"><label class="form-label">Comentário / resposta ao solicitante <span class="text-muted fw-normal">(obrigatório para rejeitar)</span></label><textarea class="form-control" name="resposta" rows="2"></textarea></div>
           </div>
           <div class="d-flex gap-2 mt-3">
             <button class="btn btn-success" name="decisao" value="aprovar"><i class="bi bi-check2-circle"></i> Aprovar e gerar OT</button>

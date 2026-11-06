@@ -1,4 +1,4 @@
-<?php if (usuario()): ?>
+<?php unset($_SESSION['old']); ?><?php if (usuario()): ?>
   </main>
 </div>
 <?php else: ?>

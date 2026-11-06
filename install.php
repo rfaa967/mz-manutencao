@@ -24,7 +24,10 @@ if (!isset($opt['sim'])) {
 $sql = file_get_contents(__DIR__ . '/database/schema.sql');
 $sql = preg_replace('/^--.*$/m', '', $sql);
 foreach (array_filter(array_map('trim', explode(';', $sql))) as $stmt) db()->exec($stmt);
-echo "✔ Estrutura criada\n";
+db()->exec('DROP TABLE IF EXISTS migracoes, fila_emails, sequencias, login_falhas');
+require __DIR__ . '/app/migracoes.php';
+aplicar_migracoes();
+echo "✔ Estrutura criada (schema + migrações)\n";
 
 $adminId = insert('usuarios', ['nome' => $opt['nome'] ?? 'Administrador', 'email' => mb_strtolower($opt['email']), 'senha_hash' => password_hash($opt['senha'], PASSWORD_DEFAULT), 'perfil' => 'admin']);
 echo "✔ Administrador {$opt['email']} criado\n";
