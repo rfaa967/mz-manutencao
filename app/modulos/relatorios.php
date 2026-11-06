@@ -1,9 +1,13 @@
 <?php
 exigir('gerir');
 
-$ini = get('de', date('Y-m-01', strtotime('-5 months')));
-$fim = get('ate', date('Y-m-d'));
-if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $ini) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $fim) || $ini > $fim) { $ini = date('Y-m-01'); $fim = date('Y-m-d'); }
+$ini = (string)get('de', date('Y-m-01', strtotime(date('Y-m-01') . ' -5 months')));
+$fim = (string)get('ate', date('Y-m-d'));
+$avisoPeriodo = null;
+if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $ini) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $fim) || $ini > $fim || strtotime($fim) - strtotime($ini) > 5 * 366 * 86400) {
+    $avisoPeriodo = 'Período inválido (data inicial depois da final, formato incorreto ou mais de 5 anos). Mostrando o mês atual.';
+    $ini = date('Y-m-01'); $fim = date('Y-m-d');
+}
 $ativoF = (int)get('ativo', 0);
 $ids = $ativoF ? descendentes('ativos', $ativoF) : null;
 $fa = $ids ? ' AND o.ativo_id IN (' . implode(',', $ids) . ')' : '';
@@ -13,31 +17,38 @@ $dias = (strtotime($fim) - strtotime($ini)) / 86400 + 1;
 $k = kpis($ini, $fim, $ids);
 
 $porAtivo = q("SELECT a.id, a.codigo, a.nome, a.criticidade, a.horas_operacao_dia,
-      COUNT(o.id) ots, SUM(o.tipo='corretiva') falhas, SUM(o.horas_parada) parada,
+      COUNT(o.id) ots, SUM(o.tipo='corretiva') falhas,
       AVG(CASE WHEN o.tipo='corretiva' AND o.data_inicio IS NOT NULL THEN TIMESTAMPDIFF(MINUTE,o.data_inicio,o.data_fim)/60 END) mttr,
-      SUM(" . SQL_CUSTO_OT . ") mo, SUM(" . SQL_CUSTO_MAT . ") mat, SUM(o.custo_externo) ext
+      SUM(" . SQL_CUSTO_OT . ") mo, SUM(" . SQL_CUSTO_MAT . ") mat, SUM(o.custo_externo) ext,
+      SUM(" . SQL_CUSTO_OT . " + " . SQL_CUSTO_MAT . " + o.custo_externo) total
     FROM ordens_trabalho o JOIN ativos a ON a.id=o.ativo_id
-    WHERE o.status='concluida' AND o.data_fim BETWEEN ? AND ? $fa GROUP BY a.id ORDER BY (SUM(" . SQL_CUSTO_OT . ")+SUM(" . SQL_CUSTO_MAT . ")+SUM(o.custo_externo)) DESC", $p);
+    WHERE o.status='concluida' AND o.data_fim BETWEEN ? AND ? $fa
+    GROUP BY a.id, a.codigo, a.nome, a.criticidade, a.horas_operacao_dia ORDER BY total DESC", $p);
+$paradaAtivo = paradas_no_periodo($ini, $fim, $ids, fn(int $id) => $id);
+$paradaCorrAtivo = paradas_no_periodo($ini, $fim, $ids, fn(int $id) => $id, true);
+$diasDec = max(0, (strtotime(min($fim, date('Y-m-d'))) - strtotime($ini)) / 86400 + 1);
 foreach ($porAtivo as &$r) {
-    $h = $dias * (float)$r['horas_operacao_dia'];
+    $h = $diasDec * (float)$r['horas_operacao_dia'];
+    $r['parada'] = $paradaAtivo[(int)$r['id']] ?? 0;
+    $pc = $paradaCorrAtivo[(int)$r['id']] ?? 0;
     $r['custo'] = $r['mo'] + $r['mat'] + $r['ext'];
-    $r['disp'] = $h > 0 ? max(0, ($h - $r['parada']) / $h * 100) : null;
-    $r['mtbf'] = $r['falhas'] > 0 ? ($h - $r['parada']) / $r['falhas'] : null;
+    $r['disp'] = $h > 0 ? max(0, min(100, ($h - $r['parada']) / $h * 100)) : null;
+    $r['mtbf'] = $r['falhas'] > 0 && $h > 0 ? max(0, ($h - $pc) / $r['falhas']) : null;
 }
 unset($r);
 
 $causas = q("SELECT COALESCE(causa_falha,'(não informada)') causa, COUNT(*) n, SUM(horas_parada) parada FROM ordens_trabalho o
-             WHERE tipo='corretiva' AND status='concluida' AND data_fim BETWEEN ? AND ? $fa GROUP BY causa ORDER BY n DESC LIMIT 15", $p);
+             WHERE tipo='corretiva' AND status='concluida' AND data_fim BETWEEN ? AND ? $fa GROUP BY COALESCE(causa_falha,'(não informada)') ORDER BY n DESC LIMIT 15", $p);
 $tecnicos = q("SELECT t.nome, SUM(m.horas) horas, SUM(m.horas*m.custo_hora) custo, COUNT(DISTINCT m.ot_id) ots
                FROM ot_mao_obra m JOIN tecnicos t ON t.id=m.tecnico_id JOIN ordens_trabalho o ON o.id=m.ot_id
-               WHERE m.data BETWEEN ? AND ? $fa GROUP BY t.id ORDER BY horas DESC", [$ini, $fim]);
+               WHERE m.data BETWEEN ? AND ? $fa GROUP BY t.id, t.nome ORDER BY horas DESC", [$ini, $fim]);
 $materiais = q("SELECT a.codigo, a.descricao, a.unidade, SUM(m.quantidade) qtd, SUM(m.quantidade*m.custo_unitario) custo
                 FROM ot_materiais m JOIN artigos a ON a.id=m.artigo_id JOIN ordens_trabalho o ON o.id=m.ot_id
-                WHERE o.status='concluida' AND o.data_fim BETWEEN ? AND ? $fa GROUP BY a.id ORDER BY custo DESC LIMIT 20", $p);
+                WHERE m.baixado = 1 AND o.status='concluida' AND o.data_fim BETWEEN ? AND ? $fa GROUP BY a.id, a.codigo, a.descricao, a.unidade ORDER BY custo DESC LIMIT 20", $p);
 $porTipo = q("SELECT tipo, COUNT(*) n FROM ordens_trabalho o WHERE status='concluida' AND data_fim BETWEEN ? AND ? $fa GROUP BY tipo", $p);
 $semPlano = q("SELECT a.id, a.codigo, a.nome, a.criticidade FROM ativos a WHERE a.status <> 'desativado' AND a.criticidade IN ('A','B')
                AND NOT EXISTS (SELECT 1 FROM planos_manutencao p WHERE p.ativo_id=a.id AND p.ativo=1) ORDER BY a.criticidade, a.codigo LIMIT 30");
-$backlog = q("SELECT o.tipo, COUNT(*) n, SUM(o.data_prevista < CURDATE()) atrasadas FROM ordens_trabalho o WHERE status NOT IN ('concluida','cancelada') $fa GROUP BY o.tipo");
+$backlog = q("SELECT o.tipo, COUNT(*) n, SUM(o.data_prevista < CURDATE()) atrasadas FROM ordens_trabalho o WHERE status IN (" . STATUS_PENDENTES . ") $fa GROUP BY o.tipo");
 
 if ($csv = get('csv')) {
     match ($csv) {
@@ -55,6 +66,7 @@ $qs = fn(string $t) => '?' . http_build_query(['r' => 'relatorios', 'de' => $ini
 $totalCausas = max(1, array_sum(array_column($causas, 'n')));
 
 view_header('Relatórios & KPIs', 'relatorios'); ?>
+<?php if ($avisoPeriodo): ?><div class="alert alert-warning"><?= e($avisoPeriodo) ?></div><?php endif; ?>
 <div class="page-title"><h1>Relatórios e indicadores</h1><button class="btn btn-outline-secondary btn-sm no-print" onclick="window.print()"><i class="bi bi-printer"></i> Imprimir</button></div>
 <form class="card card-body py-2 mb-3 no-print" method="get"><input type="hidden" name="r" value="relatorios"><div class="row g-2 align-items-end">
   <div class="col-md-2"><label class="form-label">De</label><input type="date" class="form-control form-control-sm" name="de" value="<?= e($ini) ?>"></div>
@@ -64,7 +76,7 @@ view_header('Relatórios & KPIs', 'relatorios'); ?>
 
 <div class="row g-3 mb-3">
 <?php foreach ([
-    ['Disponibilidade', $k['disponibilidade'] !== null ? num($k['disponibilidade'], 2) . '%' : '—', '(horas operação − parada) / horas operação'],
+    ['Disponibilidade', $k['disponibilidade'] !== null ? num($k['disponibilidade'], 1) . '%' : '—', '(horas operação − parada) / horas operação'],
     ['MTBF', $k['mtbf'] !== null ? num($k['mtbf'], 0) . ' h' : '—', 'tempo médio entre falhas'],
     ['MTTR', $k['mttr'] !== null ? num($k['mttr'], 1) . ' h' : '—', 'tempo médio de reparo (corretivas)'],
     ['Horas de parada', num($k['horas_parada'], 1) . ' h', $k['corretivas'] . ' falha(s)'],

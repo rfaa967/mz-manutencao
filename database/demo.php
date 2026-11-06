@@ -162,6 +162,13 @@ function demo_popular(int $adminId, string $senha): void
     insert('ordens_trabalho', ['numero' => proximo_numero('ordens_trabalho', 'OT'), 'ativo_id' => $cnc, 'tipo' => 'melhoria', 'prioridade' => 'baixa', 'status' => 'aberta',
         'titulo' => 'Instalar iluminação LED interna na CNC', 'data_prevista' => date('Y-m-d', strtotime('+12 days')), 'criado_por' => $adminId]);
 
+    // custos desnormalizados das OTs criadas acima por inserção direta
+    qx('UPDATE ordens_trabalho o
+          LEFT JOIN (SELECT ot_id, SUM(horas * custo_hora) v FROM ot_mao_obra GROUP BY ot_id) mo ON mo.ot_id = o.id
+          LEFT JOIN (SELECT ot_id, SUM(quantidade * custo_unitario) v FROM ot_materiais WHERE baixado = 1 GROUP BY ot_id) mt ON mt.ot_id = o.id
+        SET o.custo_mo = COALESCE(mo.v, 0), o.custo_mat = COALESCE(mt.v, 0)');
+    // pedidos de demonstração com a localização do ativo
+    qx('UPDATE pedidos p JOIN ativos a ON a.id = p.ativo_id SET p.localizacao_id = a.localizacao_id WHERE p.localizacao_id IS NULL');
     // gera as preventivas devidas hoje (inclui as por contador)
     gerar_preventivas($adminId);
 }

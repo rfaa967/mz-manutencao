@@ -7,7 +7,7 @@ exigir('gerir');
 
 $CAD = [
     'localizacoes' => [
-        'tabela' => 'localizacoes', 'titulo' => 'Localizações', 'singular' => 'localização', 'ordem' => 'nome',
+        'tabela' => 'localizacoes', 'titulo' => 'Localizações', 'singular' => 'localização', 'f' => true, 'ordem' => 'nome',
         'campos' => [
             'codigo' => ['Código', 'text'], 'nome' => ['Nome', 'text', 'req' => true],
             'parent_id' => ['Pertence a', 'tree'], 'descricao' => ['Descrição', 'textarea'],
@@ -15,11 +15,11 @@ $CAD = [
         'lista' => ['codigo', 'nome', 'parent_id'], 'arvore' => true,
     ],
     'categorias' => [
-        'tabela' => 'categorias_ativo', 'titulo' => 'Categorias de ativo', 'singular' => 'categoria', 'ordem' => 'nome',
+        'tabela' => 'categorias_ativo', 'titulo' => 'Categorias de ativo', 'singular' => 'categoria', 'f' => true, 'ordem' => 'nome',
         'campos' => ['nome' => ['Nome', 'text', 'req' => true]], 'lista' => ['nome'],
     ],
     'especialidades' => [
-        'tabela' => 'especialidades', 'titulo' => 'Especialidades', 'singular' => 'especialidade', 'ordem' => 'nome',
+        'tabela' => 'especialidades', 'titulo' => 'Especialidades', 'singular' => 'especialidade', 'f' => true, 'ordem' => 'nome',
         'campos' => ['nome' => ['Nome', 'text', 'req' => true]], 'lista' => ['nome'],
     ],
     'fornecedores' => [
@@ -90,7 +90,7 @@ if ($acao === 'salvar' && is_post()) {
     try {
         if ($id) { update($tab, $dados, $id); auditar('editar', $tab, $id); }
         else { $id = insert($tab, $dados); auditar('criar', $tab, $id); }
-        flash(ucfirst($c['singular']) . ' salvo(a).');
+        flash(mb_strtoupper(mb_substr($c['singular'], 0, 1)) . mb_substr($c['singular'], 1) . (!empty($c['f']) ? ' salva.' : ' salvo.'));
     } catch (PDOException $ex) {
         flash($ex->getCode() === '23000' ? 'Já existe um registro com esses dados.' : 'Erro ao salvar.', 'danger');
     }
@@ -114,10 +114,12 @@ if ($acao === 'excluir' && is_post()) {
 if ($acao === 'form') {
     $id = (int)get('id', 0);
     $r = $id ? q1("SELECT * FROM `$tab` WHERE id = ?", [$id]) : [];
+    if (!empty($_SESSION['old']) || !empty($GLOBALS['__old'])) $r = com_old($r);
     if ($id && !$r) redirect('cadastros', ['t' => $t]);
-    view_header(($id ? 'Editar ' : 'Novo(a) ') . $c['singular'], $menu);
+    $novo = !empty($c['f']) ? 'Nova' : 'Novo';
+    view_header(($id ? 'Editar ' : "$novo ") . $c['singular'], $menu);
     ?>
-    <div class="page-title"><h1><?= $id ? 'Editar' : 'Novo(a)' ?> <?= e($c['singular']) ?></h1>
+    <div class="page-title"><h1><?= $id ? 'Editar' : $novo ?> <?= e($c['singular']) ?></h1>
       <a class="btn btn-outline-secondary btn-sm" href="<?= e(url('cadastros', ['t' => $t])) ?>">Voltar</a></div>
     <div class="card"><div class="card-body">
     <form method="post" action="<?= e(url('cadastros/salvar', ['t' => $t])) ?>"><?= csrf_field() ?>
@@ -178,14 +180,15 @@ view_header($c['titulo'], $menu);
     <?php
     $filhos = [];
     foreach ($linhas as $l) $filhos[(int)($l['parent_id'] ?? 0)][] = $l;
-    $render = function (int $pai) use (&$render, $filhos, $t) {
+    $qtdAtivos = opcoes('SELECT localizacao_id, COUNT(*) FROM ativos WHERE localizacao_id IS NOT NULL GROUP BY localizacao_id');
+    $render = function (int $pai) use (&$render, $filhos, $t, $qtdAtivos) {
         if (empty($filhos[$pai])) return;
         echo '<ul>';
         foreach ($filhos[$pai] as $n) {
-            $qtd = (int)qv('SELECT COUNT(*) FROM ativos WHERE localizacao_id = ?', [$n['id']]);
+            $qtd = (int)($qtdAtivos[$n['id']] ?? 0);
             echo '<li><i class="bi bi-geo-alt text-warning"></i> <a href="' . e(url('cadastros/form', ['t' => $t, 'id' => $n['id']])) . '">'
                . ($n['codigo'] ? '<span class="text-muted">' . e($n['codigo']) . '</span> ' : '') . e($n['nome']) . '</a>'
-               . ($qtd ? ' <a class="badge text-bg-light" href="' . e(url('ativos', ['loc' => $n['id']])) . '">' . $qtd . ' ativo(s)</a>' : '');
+               . ($qtd ? ' <a class="badge text-bg-light" href="' . e(url('ativos', ['loc' => $n['id']])) . '">' . plural($qtd, 'ativo', 'ativos') . '</a>' : '');
             $render((int)$n['id']);
             echo '</li>';
         }

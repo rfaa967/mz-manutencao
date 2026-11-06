@@ -27,18 +27,20 @@ $cad = [
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
 <link href="<?= e(asset('app.css')) ?>" rel="stylesheet">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Ccircle cx=%278%27 cy=%278%27 r=%277%27 fill=%27%23ffc107%27/%3E%3C/svg%3E">
+<link rel="icon" href="<?= e(asset('icone.svg')) ?>">
 <meta name="csrf" content="<?= e(csrf_token()) ?>">
 </head>
 <body>
+<div class="d-none d-print-block mb-2 border-bottom pb-1"><strong><?= e(cfg('empresa')) ?></strong> · <?= e(cfg('app_nome')) ?> <span class="float-end small"><?= date('d/m/Y H:i') ?></span></div>
 <?php if ($u): ?>
 <nav class="navbar navbar-dark bg-dark d-lg-none px-3">
-  <button class="btn btn-outline-light btn-sm" data-bs-toggle="offcanvas" data-bs-target="#sidebar"><i class="bi bi-list"></i></button>
+  <button class="btn btn-outline-light btn-sm" data-bs-toggle="offcanvas" data-bs-target="#sidebar" aria-label="Abrir menu"><i class="bi bi-list"></i></button>
   <span class="navbar-brand mb-0 h6"><?= e(cfg('app_nome')) ?></span>
 </nav>
 <div class="d-flex">
   <aside id="sidebar" class="offcanvas-lg offcanvas-start bg-dark text-white sidebar" tabindex="-1">
-    <div class="p-3 border-bottom border-secondary">
+    <div class="p-3 border-bottom border-secondary position-relative">
+      <button type="button" class="btn-close btn-close-white d-lg-none position-absolute top-0 end-0 m-3" data-bs-dismiss="offcanvas" data-bs-target="#sidebar" aria-label="Fechar menu"></button>
       <div class="fw-bold fs-5"><i class="bi bi-gear-wide-connected text-warning"></i> <?= e(cfg('app_nome')) ?></div>
       <div class="small text-secondary"><?= e(cfg('empresa')) ?></div>
     </div>
@@ -60,11 +62,13 @@ $cad = [
     <div class="mt-auto p-3 border-top border-secondary small">
       <div><i class="bi bi-person-circle"></i> <?= e($u['nome']) ?></div>
       <div class="text-secondary mb-2"><?= e(rotulo('perfil', $u['perfil'])) ?></div>
+      <a href="<?= e(url('m')) ?>" class="link-light me-3"><i class="bi bi-phone"></i> Mobile</a>
       <a href="<?= e(url('perfil')) ?>" class="link-light me-3">Minha conta</a>
-      <a href="<?= e(url('logout')) ?>" class="link-warning">Sair</a>
+      <form method="post" action="<?= e(url('logout')) ?>" class="d-inline"><?= csrf_field() ?><button class="btn btn-link link-warning p-0 align-baseline small">Sair</button></form>
     </div>
   </aside>
   <main class="flex-grow-1 p-3 p-lg-4 conteudo">
+    <a href="<?= e(url('m')) ?>" class="alert alert-warning d-block d-md-none py-2 small text-decoration-none no-print"><i class="bi bi-phone"></i> Está no celular? Abra a <strong>versão mobile</strong>, com leitor de QR Code.</a>
 <?php else: ?>
 <main class="container py-5">
 <?php endif; ?>

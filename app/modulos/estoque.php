@@ -5,26 +5,31 @@ $forns = opcoes('SELECT id, nome FROM fornecedores ORDER BY nome');
 if ($acao === 'salvar' && is_post()) {
     exigir('gerir');
     $id = post_int('id');
+    $volta = fn(string $m) => [flash($m, 'danger'), redirect('estoque/form', $id ? ['id' => $id] : [])];
     $dados = [
-        'codigo' => mb_strtoupper((string)post('codigo')), 'descricao' => (string)post('descricao'), 'unidade' => post('unidade') ?: 'un',
-        'familia' => post('familia') ?: null, 'estoque_minimo' => post_dec('estoque_minimo') ?? 0, 'fornecedor_id' => post_int('fornecedor_id'),
-        'localizacao' => post('localizacao') ?: null, 'ativo' => post('ativo') ? 1 : 0,
+        'codigo' => mb_strtoupper(mb_substr((string)post('codigo'), 0, 40)), 'descricao' => mb_substr((string)post('descricao'), 0, 200),
+        'unidade' => mb_substr((string)post('unidade'), 0, 10) ?: 'un', 'familia' => mb_substr((string)post('familia'), 0, 80) ?: null,
+        'estoque_minimo' => post_dec_pos('estoque_minimo') ?? 0, 'fornecedor_id' => post_int('fornecedor_id'),
+        'localizacao' => mb_substr((string)post('localizacao'), 0, 80) ?: null, 'ativo' => post('ativo') ? 1 : 0,
     ];
-    if (!$dados['codigo'] || !$dados['descricao']) { flash('Código e descrição são obrigatórios.', 'danger'); redirect('estoque/form', $id ? ['id' => $id] : []); }
+    if (!$dados['codigo'] || !$dados['descricao']) $volta('Código e descrição são obrigatórios.');
+    if (dec_invalido('estoque_minimo') || dec_invalido('estoque_inicial') || dec_invalido('custo_medio')) $volta('Quantidades e custos devem ser números positivos.');
+    db()->beginTransaction();
     try {
         if ($id) update('artigos', $dados, $id);
         else {
-            $dados['custo_medio'] = post_dec('custo_medio') ?? 0;
+            $dados['custo_medio'] = post_dec_pos('custo_medio') ?? 0;
             $id = insert('artigos', $dados);
-            $ini = post_dec('estoque_inicial');
-            if ($ini > 0) { db()->beginTransaction(); movimentar_estoque($id, 'entrada', $ini, $dados['custo_medio'], null, 'INICIAL', 'Saldo inicial'); db()->commit(); }
+            $ini = post_dec_pos('estoque_inicial');
+            if ($ini > 0) movimentar_estoque($id, 'entrada', round($ini, 3), $dados['custo_medio'], null, 'INICIAL', 'Saldo inicial');
         }
+        db()->commit();
         auditar('salvar', 'artigos', $id);
         flash('Artigo salvo.');
         redirect('estoque/ver', ['id' => $id]);
     } catch (PDOException $ex) {
-        flash($ex->getCode() === '23000' ? 'Código já existente.' : 'Erro ao salvar.', 'danger');
-        redirect('estoque/form', $id ? ['id' => $id] : []);
+        if (db()->inTransaction()) db()->rollBack();
+        $volta(($ex->errorInfo[1] ?? 0) == 1062 ? 'Já existe um artigo com esse código.' : 'Erro ao salvar (valor fora do limite?).');
     }
 }
 
@@ -32,17 +37,19 @@ if ($acao === 'movimento' && is_post()) {
     exigir('gerir');
     $id = (int)post_int('artigo_id');
     $tipo = (string)post('tipo');
-    $qtd = post_dec('quantidade');
-    if (!in_array($tipo, ['entrada', 'saida', 'ajuste'], true) || $qtd === null || ($tipo !== 'ajuste' && $qtd <= 0) || $qtd < 0) {
-        flash('Movimento inválido.', 'danger'); redirect('estoque/ver', ['id' => $id]);
+    $qtd = post_dec_pos('quantidade');
+    $custo = $tipo === 'entrada' ? post_dec_pos('custo_unitario') : null;
+    if (!in_array($tipo, ['entrada', 'saida', 'ajuste'], true) || $qtd === null || ($tipo !== 'ajuste' && round($qtd, 3) <= 0) || $qtd > 99999999) {
+        flash('Informe uma quantidade válida (positiva; no ajuste, o novo saldo).', 'danger'); redirect('estoque/ver', ['id' => $id]);
     }
+    if ($tipo === 'entrada' && dec_invalido('custo_unitario')) { flash('O custo unitário não pode ser negativo.', 'danger'); redirect('estoque/ver', ['id' => $id]); }
     db()->beginTransaction();
     try {
-        movimentar_estoque($id, $tipo, $qtd, $tipo === 'entrada' ? post_dec('custo_unitario') : null, null, post('documento') ?: null, post('observacao') ?: null);
+        movimentar_estoque($id, $tipo, round($qtd, 3), $custo, null, mb_substr((string)post('documento'), 0, 60) ?: null, mb_substr((string)post('observacao'), 0, 255) ?: null);
         db()->commit();
         auditar('mov_' . $tipo, 'artigos', $id, (string)$qtd);
         flash('Movimento registrado.');
-    } catch (RuntimeException $ex) { db()->rollBack(); flash($ex->getMessage(), 'danger'); }
+    } catch (RuntimeException $ex) { if (db()->inTransaction()) db()->rollBack(); flash($ex instanceof PDOException ? 'Valor fora do limite permitido.' : $ex->getMessage(), 'danger'); }
     redirect('estoque/ver', ['id' => $id]);
 }
 
@@ -50,6 +57,7 @@ if ($acao === 'form') {
     exigir('gerir');
     $id = (int)get('id', 0);
     $a = $id ? q1('SELECT * FROM artigos WHERE id = ?', [$id]) : ['unidade' => 'un', 'ativo' => 1, 'estoque_minimo' => 0];
+    if (!empty($_SESSION['old']) || !empty($GLOBALS['__old'])) $a = com_old($a);
     view_header('Artigo', 'estoque'); ?>
     <div class="page-title"><h1><?= $id ? 'Editar artigo' : 'Novo artigo' ?></h1><a class="btn btn-outline-secondary btn-sm" href="<?= e(url('estoque')) ?>">Voltar</a></div>
     <div class="card"><div class="card-body"><form method="post" action="<?= e(url('estoque/salvar')) ?>"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $id ?: '' ?>">

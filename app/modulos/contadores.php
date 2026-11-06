@@ -4,10 +4,15 @@ $ativoId = (int)get('ativo', 0) ?: (int)post_int('ativo_id');
 
 if ($acao === 'salvar' && is_post()) {
     exigir('gerir');
-    $nome = (string)post('nome');
-    if ($ativoId && $nome !== '') {
-        $id = insert('contadores', ['ativo_id' => $ativoId, 'nome' => $nome, 'unidade' => post('unidade') ?: 'h', 'valor_atual' => post_dec('valor_atual') ?? 0, 'atualizado_em' => date('Y-m-d H:i:s')]);
-        insert('leituras_contador', ['contador_id' => $id, 'valor' => post_dec('valor_atual') ?? 0, 'data_leitura' => date('Y-m-d H:i:s'), 'usuario_id' => usuario()['id'], 'observacao' => 'Leitura inicial']);
+    $nome = mb_substr((string)post('nome'), 0, 80);
+    $ini = post_dec_pos('valor_atual') ?? 0;
+    if (!$ativoId || !qv('SELECT 1 FROM ativos WHERE id = ?', [$ativoId]) || $nome === '' || dec_invalido('valor_atual')) {
+        flash('Informe o nome e um valor inicial válido.', 'danger');
+    } else {
+        db()->beginTransaction();
+        $id = insert('contadores', ['ativo_id' => $ativoId, 'nome' => $nome, 'unidade' => mb_substr((string)post('unidade'), 0, 20) ?: 'h', 'valor_atual' => $ini, 'atualizado_em' => date('Y-m-d H:i:s')]);
+        insert('leituras_contador', ['contador_id' => $id, 'valor' => $ini, 'data_leitura' => date('Y-m-d H:i:s'), 'usuario_id' => usuario()['id'], 'observacao' => 'Leitura inicial']);
+        db()->commit();
         flash('Contador criado.');
     }
     redirect('contadores', ['ativo' => $ativoId]);
@@ -15,30 +20,68 @@ if ($acao === 'salvar' && is_post()) {
 
 if ($acao === 'leitura' && is_post()) {
     $c = q1('SELECT * FROM contadores WHERE id = ?', [post_int('contador_id')]);
-    $valor = post_dec('valor');
+    $valor = post_dec_pos('valor');
     $data = post_datetime('data_leitura') ?? date('Y-m-d H:i:s');
-    if (!$c || $valor === null) { flash('Leitura inválida.', 'danger'); redirect('contadores', ['ativo' => $ativoId]); }
-    if ($valor < (float)$c['valor_atual'] && !post('reset')) {
-        flash('O valor informado é menor que o atual (' . num($c['valor_atual'], 1) . '). Marque "troca/zeragem do contador" se for o caso.', 'danger');
-        redirect('contadores', ['ativo' => $c['ativo_id']]);
+    $reset = (bool)post('reset');
+    $volta = function (string $msg) use ($c, $ativoId): never {
+        flash($msg, 'danger');
+        redirect_m('m/ativo', ['id' => $c['ativo_id'] ?? $ativoId]);
+        redirect('contadores', ['ativo' => $c['ativo_id'] ?? $ativoId]);
+    };
+    if (!$c) $volta('Contador não encontrado.');
+    if ($valor === null || $valor > 999999999999) $volta('Informe a leitura como um número positivo (ex.: 1.250 ou 1250,5).');
+    if ($data > date('Y-m-d H:i:s', time() + 600)) $volta('A data da leitura não pode estar no futuro.');
+    $retroativa = $c['atualizado_em'] && $data < $c['atualizado_em'];
+    if ($reset && $retroativa) $volta('A troca/zeragem precisa ter data posterior à última leitura (' . dt($c['atualizado_em'], true) . ').');
+    if (!$reset && !$retroativa && $valor < (float)$c['valor_atual'])
+        $volta('O valor informado é menor que o atual (' . num($c['valor_atual'], 1) . '). Marque "troca/zeragem do contador" se for o caso.');
+    if ($retroativa) {
+        // leitura antiga entra só no histórico e precisa ser coerente com as leituras vizinhas
+        $antes = qv('SELECT MAX(valor) FROM leituras_contador WHERE contador_id = ? AND data_leitura <= ?', [$c['id'], $data]);
+        $depois = qv('SELECT MIN(valor) FROM leituras_contador WHERE contador_id = ? AND data_leitura >= ?', [$c['id'], $data]);
+        if (($antes !== null && $valor < (float)$antes) || ($depois !== null && $valor > (float)$depois))
+            $volta('Leitura retroativa incoerente com o histórico (deve ficar entre ' . num((float)$antes, 1) . ' e ' . num((float)$depois, 1) . ').');
     }
-    insert('leituras_contador', ['contador_id' => $c['id'], 'valor' => $valor, 'data_leitura' => $data, 'usuario_id' => usuario()['id'], 'observacao' => post('reset') ? 'Troca/zeragem do contador' : (post('observacao') ?: null)]);
-    qx('UPDATE contadores SET valor_atual = ?, atualizado_em = ? WHERE id = ?', [$valor, $data, $c['id']]);
-    if (post('reset')) {
-        // reposiciona planos por contador relativos ao novo valor
-        foreach (q('SELECT * FROM planos_manutencao WHERE contador_id = ?', [$c['id']]) as $p) {
-            update('planos_manutencao', ['proximo_valor' => $valor + (float)$p['intervalo_contador'], 'ultimo_valor' => $valor], (int)$p['id']);
+
+    db()->beginTransaction();
+    try {
+        $c = q1('SELECT * FROM contadores WHERE id = ? FOR UPDATE', [$c['id']]);
+        insert('leituras_contador', ['contador_id' => $c['id'], 'valor' => $valor, 'data_leitura' => $data, 'usuario_id' => usuario()['id'],
+            'observacao' => $reset ? 'Troca/zeragem do contador (antes: ' . num($c['valor_atual'], 1) . ')' : (mb_substr((string)post('observacao'), 0, 255) ?: null)]);
+        if (!$retroativa) qx('UPDATE contadores SET valor_atual = ?, atualizado_em = ? WHERE id = ?', [$valor, $data, $c['id']]);
+        if ($reset) {
+            // reposiciona os planos na nova escala, preservando o que faltava para a próxima revisão
+            foreach (q('SELECT * FROM planos_manutencao WHERE contador_id = ? FOR UPDATE', [$c['id']]) as $p) {
+                $pend = q1("SELECT id FROM ordens_trabalho WHERE plano_id = ? AND status IN (" . STATUS_PENDENTES . ") LIMIT 1", [$p['id']]);
+                if ($pend) {
+                    // já venceu: a OT pendente passa a referenciar a nova escala
+                    qx('UPDATE ordens_trabalho SET valor_previsto = ? WHERE id = ?', [$valor, $pend['id']]);
+                    $novo = $valor;
+                } else {
+                    $novo = $valor + max(0, (float)$p['proximo_valor'] - (float)$c['valor_atual']);
+                }
+                update('planos_manutencao', ['proximo_valor' => $novo, 'ultimo_valor' => $valor], (int)$p['id']);
+            }
         }
+        db()->commit();
+    } catch (Throwable $ex) {
+        if (db()->inTransaction()) db()->rollBack();
+        throw $ex;
     }
-    $g = gerar_preventivas(usuario()['id']);
-    flash('Leitura registrada.' . ($g ? ' ' . count($g) . ' OT(s) preventiva(s) gerada(s) pelo contador.' : ''));
+    $g = $retroativa ? [] : gerar_preventivas(usuario()['id'], (int)$c['id']);
+    flash(($retroativa ? 'Leitura retroativa registrada no histórico.' : 'Leitura registrada.') . ($g ? ' ' . plural(count($g), 'OT preventiva gerada', 'OTs preventivas geradas') . ' pelo contador.' : ''));
+    redirect_m('m/ativo', ['id' => $c['ativo_id']]);
     redirect('contadores', ['ativo' => $c['ativo_id']]);
 }
 
 if ($acao === 'excluir' && is_post()) {
     exigir('gerir');
-    qx('DELETE FROM contadores WHERE id = ?', [post_int('contador_id')]);
-    flash('Contador excluído.');
+    try {
+        qx('DELETE FROM contadores WHERE id = ?', [post_int('contador_id')]);
+        flash('Contador excluído.');
+    } catch (PDOException) {
+        flash('Este contador é usado por um plano de manutenção. Altere ou exclua o plano antes.', 'danger');
+    }
     redirect('contadores', ['ativo' => $ativoId]);
 }
 

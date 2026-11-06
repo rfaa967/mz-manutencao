@@ -20,6 +20,9 @@ body { background: #f3f5f8; }
 .atrasada { background: #fff3f3 !important; }
 .form-label { font-size: .85rem; font-weight: 600; color: #495057; margin-bottom: .2rem; }
 @media print {
+  .checklist .form-check-input { border: 1px solid #000 !important; opacity: 1 !important; }
+  .checklist .form-check-label { color: #000 !important; opacity: 1 !important; }
+  .assinaturas { display: flex !important; gap: 3rem; margin-top: 3rem; }
   .sidebar, .navbar, .no-print, .btn { display: none !important; }
   body { background: #fff; }
   .card { box-shadow: none; border: 1px solid #ccc; }
@@ -27,3 +30,8 @@ body { background: #f3f5f8; }
 
 .fc a { text-decoration: none; }
 .fc .fc-event { cursor: pointer; }
+
+.assinaturas { display: none; }
+.assinaturas > div { flex: 1; border-top: 1px solid #000; padding-top: .25rem; font-size: .85rem; }
+.fc .ot-atrasada { border-left: 4px solid #dc3545 !important; }
+@media (max-width: 575.98px) { .fc .fc-toolbar { flex-direction: column; gap: .5rem; } .fc .fc-toolbar-title { font-size: 1.1rem; } }

@@ -7,9 +7,9 @@ if ($acao === 'salvar' && is_post()) {
     $id = post_int('id');
     $email = mb_strtolower((string)post('email'));
     $dados = [
-        'nome' => (string)post('nome'), 'email' => $email,
+        'nome' => mb_substr((string)post('nome'), 0, 120), 'email' => $email,
         'perfil' => in_array(post('perfil'), array_keys(ROTULOS['perfil']), true) ? post('perfil') : 'solicitante',
-        'tecnico_id' => post_int('tecnico_id'), 'ativo' => post('ativo') ? 1 : 0,
+        'tecnico_id' => isset($tecnicos[(int)post_int('tecnico_id')]) ? post_int('tecnico_id') : null, 'ativo' => post('ativo') ? 1 : 0, 'receber_emails' => post('receber_emails') ? 1 : 0,
     ];
     $senha = (string)post('senha');
     if (!$dados['nome'] || !filter_var($email, FILTER_VALIDATE_EMAIL)) { flash('Nome e e-mail válidos são obrigatórios.', 'danger'); redirect('usuarios/form', $id ? ['id' => $id] : []); }
@@ -25,13 +25,15 @@ if ($acao === 'salvar' && is_post()) {
         flash('Usuário salvo.');
     } catch (PDOException $ex) {
         flash($ex->getCode() === '23000' ? 'Já existe usuário com esse e-mail.' : 'Erro ao salvar.', 'danger');
+        redirect('usuarios/form', $id ? ['id' => $id] : []);
     }
     redirect('usuarios');
 }
 
 if ($acao === 'form') {
     $id = (int)get('id', 0);
-    $r = $id ? q1('SELECT * FROM usuarios WHERE id = ?', [$id]) : ['ativo' => 1, 'perfil' => 'solicitante'];
+    $r = $id ? q1('SELECT * FROM usuarios WHERE id = ?', [$id]) : ['ativo' => 1, 'perfil' => 'solicitante', 'receber_emails' => 1];
+    if (!empty($_SESSION['old']) || !empty($GLOBALS['__old'])) $r = com_old($r);
     view_header('Usuário', 'usuarios'); ?>
     <div class="page-title"><h1><?= $id ? 'Editar usuário' : 'Novo usuário' ?></h1><a class="btn btn-outline-secondary btn-sm" href="<?= e(url('usuarios')) ?>">Voltar</a></div>
     <div class="card"><div class="card-body">
@@ -43,7 +45,8 @@ if ($acao === 'form') {
         <div class="col-md-4"><label class="form-label">Vincular a técnico</label><?= sel('tecnico_id', $tecnicos, $r['tecnico_id'] ?? null) ?>
           <div class="form-text">Permite ao técnico ver "Minhas OTs".</div></div>
         <div class="col-md-4"><label class="form-label">Senha <?= $id ? '(deixe vazio para manter)' : '*' ?></label><input class="form-control" type="password" name="senha" minlength="8" <?= $id ? '' : 'required' ?>></div>
-        <div class="col-12"><div class="form-check"><input class="form-check-input" type="checkbox" name="ativo" value="1" id="ativo" <?= $r['ativo'] ? 'checked' : '' ?>><label class="form-check-label" for="ativo">Ativo</label></div></div>
+        <div class="col-12"><div class="form-check"><input class="form-check-input" type="checkbox" name="ativo" value="1" id="ativo" <?= $r['ativo'] ? 'checked' : '' ?>><label class="form-check-label" for="ativo">Ativo</label></div>
+          <div class="form-check"><input class="form-check-input" type="checkbox" name="receber_emails" value="1" id="rem" <?= !empty($r['receber_emails']) ? 'checked' : '' ?>><label class="form-check-label" for="rem">Receber notificações por e-mail</label></div></div>
       </div>
       <button class="btn btn-primary mt-3">Salvar</button>
     </form></div></div>

@@ -14,7 +14,7 @@ if ($acao === 'salvar' && is_post()) {
         'parent_id' => post_int('parent_id'), 'localizacao_id' => post_int('localizacao_id'),
         'categoria_id' => post_int('categoria_id'), 'fornecedor_id' => post_int('fornecedor_id'),
         'fabricante' => post('fabricante') ?: null, 'modelo' => post('modelo') ?: null, 'numero_serie' => post('numero_serie') ?: null,
-        'data_aquisicao' => post_date('data_aquisicao'), 'valor_aquisicao' => post_dec('valor_aquisicao'),
+        'data_aquisicao' => post_date('data_aquisicao'), 'valor_aquisicao' => post_dec_pos('valor_aquisicao'),
         'garantia_ate' => post_date('garantia_ate'),
         'criticidade' => in_array(post('criticidade'), ['A', 'B', 'C'], true) ? post('criticidade') : 'B',
         'status' => array_key_exists((string)post('status'), ROTULOS['ativo_status']) ? post('status') : 'operacional',
@@ -22,6 +22,9 @@ if ($acao === 'salvar' && is_post()) {
         'horas_operacao_dia' => min(24, max(0, post_dec('horas_operacao_dia') ?? 24)),
         'descricao' => post('descricao') ?: null,
     ];
+    if ($dados['garantia_ate'] && $dados['data_aquisicao'] && $dados['garantia_ate'] < $dados['data_aquisicao']) { flash('A garantia não pode terminar antes da data de aquisição.', 'danger'); redirect('ativos/form', $id ? ['id' => $id] : []); }
+    if (dec_invalido('valor_aquisicao')) { flash('Valor de aquisição inválido.', 'danger'); redirect('ativos/form', $id ? ['id' => $id] : []); }
+    if (!$dados['localizacao_id'] && $dados['parent_id']) $dados['localizacao_id'] = qv('SELECT localizacao_id FROM ativos WHERE id = ?', [$dados['parent_id']]);
     if (!$dados['codigo'] || !$dados['nome']) { flash('Código e nome são obrigatórios.', 'danger'); redirect('ativos/form', $id ? ['id' => $id] : []); }
     if ($id && $dados['parent_id'] && in_array($dados['parent_id'], descendentes('ativos', $id), true)) {
         flash('Um ativo não pode ser subordinado a ele mesmo ou a um componente seu.', 'danger'); redirect('ativos/form', ['id' => $id]);
@@ -56,10 +59,11 @@ if ($acao === 'excluir' && is_post()) {
 /* ================= DOCUMENTOS ================= */
 if ($acao === 'upload' && is_post()) {
     exigir('executar');
-    $id = post_int('id');
+    $id = (int)post_int('id');
+    if (!qv('SELECT 1 FROM ativos WHERE id = ?', [$id])) { flash('Ativo não encontrado.', 'danger'); redirect('ativos'); }
     $f = $_FILES['arquivo'] ?? null;
     $ext = strtolower(pathinfo($f['name'] ?? '', PATHINFO_EXTENSION));
-    if (!$f || $f['error'] !== UPLOAD_ERR_OK) flash('Falha no envio do arquivo.', 'danger');
+    if (!$f || !is_array($f) || !is_string($f['name'] ?? null) || $f['error'] !== UPLOAD_ERR_OK) flash('Falha no envio do arquivo.', 'danger');
     elseif ($f['size'] > cfg('upload_max_mb', 15) * 1048576) flash('Arquivo maior que o limite.', 'danger');
     elseif (!in_array($ext, cfg('upload_extensoes', []), true)) flash('Tipo de arquivo não permitido.', 'danger');
     else {
@@ -80,7 +84,8 @@ if ($acao === 'download') {
     $path = $d ? cfg('upload_dir') . '/' . basename($d['arquivo']) : '';
     if (!$d || !is_file($path)) { http_response_code(404); exit('Arquivo não encontrado'); }
     $mime = (new finfo(FILEINFO_MIME_TYPE))->file($path) ?: 'application/octet-stream';
-    $inline = in_array($mime, ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'], true);
+    $inline = in_array($mime, ['image/jpeg', 'image/png', 'image/webp'], true); // PDFs e demais: sempre download
+    header("Content-Security-Policy: sandbox; default-src 'none'; img-src 'self'");
     header('Content-Type: ' . $mime);
     header('Content-Length: ' . filesize($path));
     header('Content-Disposition: ' . ($inline ? 'inline' : 'attachment') . '; filename="' . str_replace('"', '', $d['nome_original']) . '"');
@@ -100,11 +105,53 @@ if ($acao === 'excluir_doc' && is_post()) {
     redirect('ativos/ver', ['id' => $d['ativo_id'] ?? 0, 'tab' => 'docs']);
 }
 
+/* ================= ETIQUETAS QR ================= */
+if ($acao === 'etiquetas') {
+    $w = ["a.status <> 'desativado'"]; $prm = [];
+    if ($i = get('id')) { $w[] = 'a.id = ?'; $prm[] = (int)$i; }
+    if ($l = get('loc')) { $w[] = 'a.localizacao_id IN (' . implode(',', descendentes('localizacoes', (int)$l)) . ')'; }
+    if ($c = get('cat')) { $w[] = 'a.categoria_id = ?'; $prm[] = (int)$c; }
+    if ($cr = get('crit')) { $w[] = 'a.criticidade = ?'; $prm[] = $cr; }
+    $lista = q('SELECT a.id, a.codigo, a.nome, l.nome AS local FROM ativos a LEFT JOIN localizacoes l ON l.id = a.localizacao_id WHERE ' . implode(' AND ', $w) . ' ORDER BY a.codigo LIMIT 500', $prm);
+    $tam = in_array(get('tam'), ['p', 'm', 'g'], true) ? get('tam') : 'm';
+    $mm = ['p' => 38, 'm' => 50, 'g' => 70][$tam];
+    view_header('Etiquetas QR', 'ativos'); ?>
+    <style>
+      .etq-grade { display: flex; flex-wrap: wrap; gap: 4mm; }
+      .etq { width: <?= $mm + 32 ?>mm; border: 1px dashed #adb5bd; padding: 2mm; display: flex; gap: 2mm; align-items: center; background: #fff; break-inside: avoid; page-break-inside: avoid; }
+      .etq .qr { width: <?= $mm ?>mm; height: <?= $mm ?>mm; flex: 0 0 auto; }
+      .etq .qr svg { width: 100%; height: 100%; }
+      .etq .txt { font-size: <?= $tam === 'p' ? 7 : 9 ?>pt; line-height: 1.2; overflow: hidden; }
+      .etq .cod { font-weight: 700; font-size: <?= $tam === 'p' ? 9 : 12 ?>pt; }
+      @media print { .etq { border-color: #ccc; } @page { margin: 8mm; } }
+    </style>
+    <div class="page-title no-print"><h1>Etiquetas QR dos ativos</h1>
+      <div class="d-flex gap-2"><button class="btn btn-primary btn-sm" onclick="window.print()"><i class="bi bi-printer"></i> Imprimir</button>
+      <a class="btn btn-outline-secondary btn-sm" href="<?= e(url('ativos')) ?>">Voltar</a></div></div>
+    <form class="card card-body py-2 mb-3 no-print" method="get"><input type="hidden" name="r" value="ativos/etiquetas"><div class="row g-2">
+      <div class="col-md-4"><?= sel('loc', arvore_opcoes('localizacoes'), get('loc'), true, 'class="form-select form-select-sm"', 'Todas as localizações') ?></div>
+      <div class="col-md-3"><?= sel('cat', $cats, get('cat'), true, 'class="form-select form-select-sm"', 'Todas as categorias') ?></div>
+      <div class="col-md-2"><?= sel('crit', ['A' => 'Criticidade A', 'B' => 'Criticidade B', 'C' => 'Criticidade C'], get('crit'), true, 'class="form-select form-select-sm"', 'Toda criticidade') ?></div>
+      <div class="col-md-2"><?= sel('tam', ['p' => 'Pequena (38 mm)', 'm' => 'Média (50 mm)', 'g' => 'Grande (70 mm)'], $tam, false, 'class="form-select form-select-sm"') ?></div>
+      <div class="col-md-1"><button class="btn btn-sm btn-secondary w-100">Gerar</button></div>
+    </div><div class="form-text">O QR abre a ficha do ativo na versão mobile (<?= e(url_qr('CODIGO')) ?>). Até 500 etiquetas por vez.</div></form>
+    <div class="etq-grade">
+      <?php foreach ($lista as $a): ?>
+        <div class="etq"><div class="qr" data-qr="<?= e(url_qr($a['codigo'])) ?>"></div>
+          <div class="txt"><div class="cod"><?= e($a['codigo']) ?></div><div><?= e($a['nome']) ?></div><div class="text-muted"><?= e($a['local']) ?></div>
+            <div class="text-muted mt-1"><?= e(cfg('empresa')) ?> · Manutenção</div></div></div>
+      <?php endforeach; if (!$lista): ?><p class="text-muted">Nenhum ativo para os filtros.</p><?php endif; ?>
+    </div>
+    <?php $GLOBALS['__scripts'] = qr_js(); view_footer(); exit;
+}
+
 /* ================= FORMULÁRIO ================= */
 if ($acao === 'form') {
     exigir('gerir');
     $id = (int)get('id', 0);
-    $a = $id ? q1('SELECT * FROM ativos WHERE id = ?', [$id]) : ['criticidade' => 'B', 'status' => 'operacional', 'horas_operacao_dia' => 24, 'parent_id' => get('pai')];
+    $a = $id ? q1('SELECT * FROM ativos WHERE id = ?', [$id]) : ['criticidade' => 'B', 'status' => 'operacional', 'horas_operacao_dia' => 24, 'parent_id' => get('pai'),
+        'localizacao_id' => get('pai') ? qv('SELECT localizacao_id FROM ativos WHERE id = ?', [(int)get('pai')]) : null];
+    if (!empty($_SESSION['old']) || !empty($GLOBALS['__old'])) $a = com_old($a);
     if ($id && !$a) redirect('ativos');
     view_header($id ? 'Editar ativo' : 'Novo ativo', 'ativos'); ?>
     <div class="page-title"><h1><?= $id ? 'Editar ativo' : 'Novo ativo' ?></h1>
@@ -148,23 +195,18 @@ if ($acao === 'ver') {
     $filhos = q('SELECT id, codigo, nome, status FROM ativos WHERE parent_id = ? ORDER BY codigo', [$id]);
     $contadores = q('SELECT * FROM contadores WHERE ativo_id = ?', [$id]);
     $planos = q('SELECT * FROM planos_manutencao WHERE ativo_id = ? ORDER BY ativo DESC, titulo', [$id]);
-    $ots = q("SELECT o.*, t.nome AS responsavel,
-                (SELECT COALESCE(SUM(horas*custo_hora),0) FROM ot_mao_obra WHERE ot_id=o.id) +
-                (SELECT COALESCE(SUM(quantidade*custo_unitario),0) FROM ot_materiais WHERE ot_id=o.id) + o.custo_externo AS custo
+    $ots = q("SELECT o.*, t.nome AS responsavel, " . SQL_CUSTO_OT . " + " . SQL_CUSTO_MAT . " + o.custo_externo AS custo
               FROM ordens_trabalho o LEFT JOIN tecnicos t ON t.id=o.responsavel_id WHERE o.ativo_id = ? ORDER BY o.data_abertura DESC", [$id]);
     $docs = q('SELECT * FROM ativo_documentos WHERE ativo_id = ? ORDER BY enviado_em DESC', [$id]);
 
-    // indicadores do ativo (12 meses)
-    $ini = date('Y-m-d', strtotime('-12 months'));
-    $k = q1("SELECT COUNT(*) AS falhas, COALESCE(SUM(horas_parada),0) AS parada,
-               AVG(CASE WHEN data_inicio IS NOT NULL AND data_fim IS NOT NULL THEN TIMESTAMPDIFF(MINUTE,data_inicio,data_fim)/60 END) AS mttr
-             FROM ordens_trabalho WHERE ativo_id = ? AND tipo='corretiva' AND status='concluida' AND data_fim >= ?", [$id, $ini]);
-    $horasPeriodo = 365 * (float)$a['horas_operacao_dia'];
-    $disp = $horasPeriodo > 0 ? max(0, ($horasPeriodo - (float)$k['parada']) / $horasPeriodo * 100) : 0;
-    $mtbf = $k['falhas'] > 0 ? ($horasPeriodo - (float)$k['parada']) / $k['falhas'] : null;
-    $custoTotal = array_sum(array_map(fn($o) => (float)$o['custo'], array_filter($ots, fn($o) => $o['data_abertura'] >= $ini)));
+    // indicadores do ativo e componentes (12 meses) — mesmas regras do relatório geral
+    $ini = date('Y-m-d', strtotime('-12 months +1 day'));
+    $k = kpis($ini, date('Y-m-d'), descendentes('ativos', $id));
+    $disp = $k['disponibilidade'] ?? 0; $mtbf = $k['mtbf']; $custoTotal = $k['custo_total'];
+    $k['falhas'] = $k['corretivas'];
 
-    view_header($a['codigo'], 'ativos'); ?>
+    view_header($a['codigo'], 'ativos');
+    if ($tab === 'geral') $GLOBALS['__scripts'] = qr_js(); ?>
     <div class="page-title">
       <div><div class="text-muted small"><?= e(caminho_localizacao($a['localizacao_id'] ? (int)$a['localizacao_id'] : null)) ?></div>
         <h1><span class="text-muted"><?= e($a['codigo']) ?></span> <?= e($a['nome']) ?> <?= badge('ativo_status', $a['status']) ?></h1></div>
@@ -211,6 +253,11 @@ if ($acao === 'ver') {
             <?php foreach ($filhos as $f): ?><li class="list-group-item d-flex justify-content-between"><a href="<?= e(url('ativos/ver', ['id' => $f['id']])) ?>"><?= e($f['codigo'] . ' · ' . $f['nome']) ?></a><?= badge('ativo_status', $f['status']) ?></li><?php endforeach; ?>
             <?php if (!$filhos): ?><li class="list-group-item text-muted small">Sem componentes.</li><?php endif; ?>
           </ul>
+          <div class="d-flex align-items-center gap-3 border rounded p-2 mb-3">
+            <div data-qr="<?= e(url_qr($a['codigo'])) ?>" style="width:96px;height:96px"></div>
+            <div class="small"><div class="fw-semibold">QR Code do ativo</div><div class="text-muted">Abre esta ficha no celular para reportar falha, executar OTs e registrar leituras.</div>
+              <a class="no-print" href="<?= e(url('ativos/etiquetas', ['id' => $id])) ?>" target="_blank"><i class="bi bi-printer"></i> Imprimir etiqueta</a></div>
+          </div>
           <h6>Contadores <a class="btn btn-link btn-sm" href="<?= e(url('contadores', ['ativo' => $id])) ?>">gerenciar</a></h6>
           <ul class="list-group">
             <?php foreach ($contadores as $c): ?><li class="list-group-item d-flex justify-content-between"><span><?= e($c['nome']) ?></span><strong><?= num($c['valor_atual'], 1) ?> <?= e($c['unidade']) ?></strong></li><?php endforeach; ?>
@@ -275,7 +322,7 @@ if ($cr = get('crit')) { $w[] = 'a.criticidade = ?'; $p[] = $cr; }
 $where = $w ? 'WHERE ' . implode(' AND ', $w) : '';
 
 $sql = "SELECT a.*, c.nome AS categoria, l.nome AS local,
-          (SELECT COUNT(*) FROM ordens_trabalho o WHERE o.ativo_id = a.id AND o.status NOT IN ('concluida','cancelada')) AS ots_abertas
+          (SELECT COUNT(*) FROM ordens_trabalho o WHERE o.ativo_id = a.id AND o.status IN (" . STATUS_PENDENTES . ")) AS ots_abertas
         FROM ativos a LEFT JOIN categorias_ativo c ON c.id = a.categoria_id LEFT JOIN localizacoes l ON l.id = a.localizacao_id
         $where ORDER BY a.codigo";
 
@@ -292,6 +339,7 @@ view_header('Ativos', 'ativos'); ?>
       <a class="btn btn-outline-secondary <?= $modo === 'arvore' ? 'active' : '' ?>" href="<?= e(url('ativos', ['modo' => 'arvore'])) ?>"><i class="bi bi-diagram-3"></i> Árvore</a>
     </div>
     <a class="btn btn-outline-secondary btn-sm" href="?<?= e(http_build_query($_GET + ['csv' => 1])) ?>"><i class="bi bi-filetype-csv"></i> CSV</a>
+    <a class="btn btn-outline-secondary btn-sm" href="<?= e(url('ativos/etiquetas', array_filter(['loc' => get('loc'), 'cat' => get('cat'), 'crit' => get('crit')]))) ?>"><i class="bi bi-qr-code"></i> Etiquetas QR</a>
     <?php if (pode('gerir')): ?><a class="btn btn-warning btn-sm" href="<?= e(url('ativos/form')) ?>"><i class="bi bi-plus-lg"></i> Novo ativo</a><?php endif; ?>
   </div>
 </div>
