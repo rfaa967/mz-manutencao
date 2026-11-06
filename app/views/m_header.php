@@ -15,12 +15,12 @@ $voltar = $GLOBALS['__voltar'] ?? null;
 <link rel="manifest" href="<?= e(rtrim((string)cfg('base_url', ''), '/') . '/manifest.php') ?>">
 <link rel="icon" href="<?= e(asset('icone.svg')) ?>">
 <link rel="apple-touch-icon" href="<?= e(asset('icone-192.png')) ?>">
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
-<link href="<?= e(asset('mobile.css')) ?>" rel="stylesheet">
+<?= cdn_css('bootstrap@5.3.3/dist/css/bootstrap.min.css') ?>
+<?= cdn_css('bootstrap-icons@1.11.3/font/bootstrap-icons.min.css') ?>
+<link href="<?= e(asset('mobile.css')) ?>?v=<?= (int)@filemtime(APP_ROOT . '/public/assets/mobile.css') ?>" rel="stylesheet">
 <meta name="csrf" content="<?= e(csrf_token()) ?>">
 </head>
-<body class="m-body">
+<body class="m-body" data-sw="<?= e(rtrim((string)cfg('base_url', ''), '/') . '/sw.js') ?>">
 <header class="m-top">
   <?php if ($voltar): ?><a href="<?= e($voltar) ?>" class="m-top-btn" aria-label="Voltar"><i class="bi bi-chevron-left"></i></a>
   <?php else: ?><span class="m-top-btn"><i class="bi bi-gear-wide-connected text-warning"></i></span><?php endif; ?>

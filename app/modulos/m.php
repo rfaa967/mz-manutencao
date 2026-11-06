@@ -20,7 +20,7 @@ function m_item_ot(array $o): string
     return '<a href="' . e(url('m/ot', ['id' => $o['id']])) . '" class="' . ($atr ? 'atrasada' : '') . '">'
         . '<div class="d-flex justify-content-between gap-2"><strong>' . e($o['titulo']) . '</strong>' . badge('ot_status', $o['status']) . '</div>'
         . '<div class="m-sub">' . e($o['numero']) . ' · ' . e($o['codigo'] ?? '') . ' · ' . badge('tipo_ot', $o['tipo']) . ' ' . badge('prioridade', $o['prioridade'])
-        . ($o['data_prevista'] ? ' · <span class="' . ($atr ? 'text-danger fw-semibold' : '') . '">' . dt($o['data_prevista']) . '</span>' : '') . '</div></a>';
+        . ($o['data_prevista'] ? ' · <span class="' . ($atr ? 'text-danger fw-semibold' : '') . '">' . ($atr ? '⚠ ' : '') . dt($o['data_prevista']) . '</span>' : '') . '</div></a>';
 }
 
 /* ---------------- Início ---------------- */
@@ -56,28 +56,13 @@ if ($acao === 'index') {
 /* ---------------- Leitor de QR ---------------- */
 if ($acao === 'scan') {
     m_header('Ler QR Code', url('m'), 'scan'); ?>
-    <div id="leitor"></div>
+    <div id="leitor" data-destino="<?= e(url('m/ativo')) ?>"></div>
     <div id="leitor-msg" class="small text-muted mt-2">Aponte a câmera para a etiqueta do equipamento.</div>
     <form method="get" class="mt-3"><input type="hidden" name="r" value="m/buscar">
       <label class="form-label small text-muted">Ou digite o código</label>
       <div class="input-group"><input class="form-control text-uppercase" name="q" autocomplete="off"><button class="btn btn-dark">Abrir</button></div></form>
     <?php
-    $GLOBALS['__scripts'] = '<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script><script>
-    (function(){
-      var destino = ' . json_encode(url('m/ativo')) . ';
-      var lido = false;
-      function abrir(txt){
-        if (lido) return; lido = true;
-        var cod = txt;
-        try { var u = new URL(txt, location.href); if (u.searchParams.get("c")) cod = u.searchParams.get("c"); } catch(e){}
-        location.href = destino + "&c=" + encodeURIComponent(cod);
-      }
-      var msg = document.getElementById("leitor-msg");
-      if (!window.Html5Qrcode) { msg.textContent = "Não foi possível carregar o leitor. Digite o código abaixo."; return; }
-      var q = new Html5Qrcode("leitor");
-      q.start({ facingMode: "environment" }, { fps: 10, qrbox: { width: 240, height: 240 } }, function(t){ q.stop().finally(function(){ abrir(t); }); }, function(){})
-       .catch(function(e){ msg.innerHTML = "Câmera indisponível (" + (e && e.name ? e.name : "permissão negada") + "). O navegador exige HTTPS e permissão de câmera. Digite o código abaixo."; });
-    })();</script>';
+    $GLOBALS['__scripts'] = cdn_js('html5-qrcode@2.3.8/html5-qrcode.min.js');
     m_footer(); exit;
 }
 
@@ -100,12 +85,19 @@ if ($acao === 'buscar') {
 /* ---------------- Ficha do ativo ---------------- */
 if ($acao === 'ativo') {
     $a = get('id') ? q1('SELECT * FROM ativos WHERE id = ?', [(int)get('id')]) : q1('SELECT * FROM ativos WHERE codigo = ?', [mb_strtoupper(trim((string)get('c', '')))]);
-    if (!$a) { flash('Equipamento não encontrado: ' . get('c', ''), 'warning'); redirect('m/scan'); }
+    if (!$a) {
+        $cod = (string)get('c', '');
+        flash(preg_match('/^[A-Z0-9][A-Z0-9\-_.\/]{0,39}$/i', $cod) ? "Equipamento não encontrado: $cod" : 'Equipamento não encontrado.', 'warning');
+        redirect('m/scan');
+    }
     $id = (int)$a['id'];
     $ots = pode('ver') ? q("SELECT o.*, a.codigo FROM ordens_trabalho o JOIN ativos a ON a.id=o.ativo_id WHERE o.ativo_id = ? AND o.status IN (" . STATUS_PENDENTES . ") ORDER BY o.data_prevista", [$id]) : [];
     $hist = pode('ver') ? q("SELECT o.id, o.numero, o.titulo, o.tipo, o.data_fim, o.causa_falha FROM ordens_trabalho o WHERE o.ativo_id = ? AND o.status='concluida' ORDER BY o.data_fim DESC LIMIT 5", [$id]) : [];
     $cont = pode('executar') ? q('SELECT * FROM contadores WHERE ativo_id = ?', [$id]) : [];
-    $pedAb = q("SELECT numero, titulo, criado_em FROM pedidos WHERE ativo_id = ? AND status IN ('aberto','aprovado') ORDER BY id DESC LIMIT 3", [$id]);
+    $pedAb = pode('ver')
+        ? q("SELECT numero, titulo, criado_em FROM pedidos WHERE ativo_id = ? AND status IN ('aberto','aprovado') ORDER BY id DESC LIMIT 3", [$id])
+        : q("SELECT numero, titulo, criado_em FROM pedidos WHERE ativo_id = ? AND solicitante_id = ? AND status IN ('aberto','aprovado') ORDER BY id DESC LIMIT 3", [$id, $u['id']]);
+    $pedOutros = pode('ver') ? 0 : (int)qv("SELECT COUNT(*) FROM pedidos WHERE ativo_id = ? AND solicitante_id <> ? AND status IN ('aberto','aprovado')", [$id, $u['id']]);
     m_header($a['codigo'], url('m')); ?>
     <div class="m-card">
       <div class="d-flex justify-content-between align-items-start gap-2"><h1 class="h5 mb-1"><?= e($a['nome']) ?></h1><?= badge('ativo_status', $a['status']) ?></div>
@@ -117,6 +109,7 @@ if ($acao === 'ativo') {
       </dl>
     </div>
 
+    <?php if ($pedOutros): ?><div class="alert alert-info py-2 small"><i class="bi bi-info-circle"></i> Este equipamento já tem <?= plural($pedOutros, 'pedido aberto', 'pedidos abertos') ?> por outras pessoas. Se for o mesmo problema, não precisa reportar de novo.</div><?php endif; ?>
     <?php if ($pedAb): ?><div class="alert alert-info py-2 small"><i class="bi bi-info-circle"></i> Já existe pedido aberto para este equipamento:
       <?php foreach ($pedAb as $p): ?><div><strong><?= e($p['numero']) ?></strong> — <?= e($p['titulo']) ?> (<?= dt($p['criado_em'], true) ?>)</div><?php endforeach; ?></div><?php endif; ?>
 
@@ -134,7 +127,9 @@ if ($acao === 'ativo') {
       <div class="m-card"><h2><i class="bi bi-stopwatch"></i> <?= e($c['nome']) ?>: <?= num($c['valor_atual'], 1) ?> <?= e($c['unidade']) ?></h2>
         <form method="post" action="<?= e(url('contadores/leitura')) ?>"><?= csrf_field() ?><input type="hidden" name="_m" value="1">
           <input type="hidden" name="contador_id" value="<?= $c['id'] ?>"><input type="hidden" name="ativo_id" value="<?= $id ?>">
-          <div class="input-group"><input class="form-control" inputmode="decimal" name="valor" placeholder="Nova leitura (<?= e($c['unidade']) ?>)" required><button class="btn btn-primary">Registrar</button></div>
+          <div class="input-group"><input class="form-control" inputmode="decimal" name="valor" placeholder="Nova leitura (<?= e($c['unidade']) ?>)" aria-label="Nova leitura" required><button class="btn btn-primary">Registrar</button></div>
+          <div class="form-check small mt-1"><input class="form-check-input" type="checkbox" name="reset" value="1" id="rs<?= $c['id'] ?>">
+            <label class="form-check-label" for="rs<?= $c['id'] ?>">Contador trocado/zerado</label></div>
           <div class="small text-muted mt-1">Última: <?= dt($c['atualizado_em'], true) ?></div>
         </form></div>
     <?php endforeach; ?>
@@ -164,6 +159,7 @@ if ($acao === 'pedido') {
             <input type="radio" class="btn-check" name="prioridade" id="pr_<?= $k ?>" value="<?= $k ?>" <?= $k === 'media' ? 'checked' : '' ?>><label class="btn btn-outline-secondary" for="pr_<?= $k ?>"><?= $r ?></label>
           <?php endforeach; ?></div></div>
       <div class="form-check form-switch mb-3"><input class="form-check-input" type="checkbox" role="switch" name="ativo_parado" value="1" id="parado"><label class="form-check-label" for="parado">Equipamento <strong>parado</strong></label></div>
+      <?= turnstile_widget('pedido', true) ?>
       <button class="btn btn-danger btn-m w-100"><i class="bi bi-send"></i> Enviar pedido</button>
     </form>
     <?php m_footer(); exit;
@@ -239,14 +235,15 @@ if ($acao === 'ot') {
              LEFT JOIN planos_manutencao pl ON pl.id=o.plano_id WHERE o.id = ?', [(int)get('id')]);
     if (!$o) redirect('m/ots');
     $id = (int)$o['id'];
-    $aberta = !in_array($o['status'], ['concluida', 'cancelada'], true);
-    $exec = $aberta && pode('executar');
+    $aberta = ot_aberta($o);
+    $exec = ot_pode_executar($o);
     $tar = q('SELECT * FROM ot_tarefas WHERE ot_id = ? ORDER BY ordem, id', [$id]);
     $mo = q('SELECT m.*, t.nome FROM ot_mao_obra m JOIN tecnicos t ON t.id=m.tecnico_id WHERE m.ot_id = ? ORDER BY m.id', [$id]);
     $mat = q('SELECT m.*, a.codigo, a.descricao, a.unidade FROM ot_materiais m JOIN artigos a ON a.id=m.artigo_id WHERE m.ot_id = ?', [$id]);
     $horas = array_sum(array_column($mo, 'horas'));
     $hid = fn() => csrf_field() . '<input type="hidden" name="_m" value="1"><input type="hidden" name="id" value="' . $id . '">';
     m_header($o['numero'], $o['ativo_id'] ? url('m/ativo', ['id' => $o['ativo_id']]) : url('m/ots'), 'ots'); ?>
+    <?php if ($aberta && !$exec): ?><div class="alert alert-secondary py-2 small"><i class="bi bi-lock"></i> Atribuída a <strong><?= e($o['responsavel']) ?></strong> — somente leitura.</div><?php endif; ?>
     <div class="m-card">
       <div class="small mb-1"><?= badge('tipo_ot', $o['tipo']) ?> <?= badge('prioridade', $o['prioridade']) ?> <?= badge('ot_status', $o['status']) ?></div>
       <h1 class="h5"><?= e($o['titulo']) ?></h1>
@@ -267,7 +264,7 @@ if ($acao === 'ot') {
     <?php endif; ?>
 
     <?php if ($tar): ?>
-    <div class="m-card"><h2>Checklist (<?= count(array_filter($tar, fn($t) => $t['concluida'])) ?>/<?= count($tar) ?>)</h2>
+    <div class="m-card" data-checklist><h2 data-checklist-titulo>Checklist (<?= count(array_filter($tar, fn($t) => $t['concluida'])) ?>/<?= count($tar) ?>)</h2>
       <?php foreach ($tar as $t): ?><div class="m-check"><input class="form-check-input" type="checkbox" id="t<?= $t['id'] ?>" data-tarefa="<?= $t['id'] ?>" data-url="<?= e(url('ots/tarefa')) ?>" <?= $t['concluida'] ? 'checked' : '' ?> <?= $exec ? '' : 'disabled' ?>>
         <label for="t<?= $t['id'] ?>"><?= e($t['descricao']) ?></label></div><?php endforeach; ?></div>
     <?php endif; ?>
@@ -296,20 +293,18 @@ if ($acao === 'ot') {
     <?php if ($exec): ?>
     <form method="post" action="<?= e(url('ots/status')) ?>" class="m-card border border-success" id="concluir"><?= $hid() ?><input type="hidden" name="novo" value="concluir">
       <h2 class="text-success">Concluir OT</h2>
-      <?php if ($o['tipo'] === 'corretiva'): ?><div class="mb-2"><label class="form-label small">Causa da falha</label><input class="form-control" name="causa_falha" list="causas">
+      <?php if ($o['tipo'] === 'corretiva'): ?><div class="mb-2"><label class="form-label small">Causa da falha</label><input class="form-control" name="causa_falha" list="causas" value="<?= e(old('causa_falha', $o['causa_falha'])) ?>">
         <datalist id="causas"><?php foreach (q('SELECT DISTINCT causa_falha FROM ordens_trabalho WHERE causa_falha IS NOT NULL ORDER BY causa_falha LIMIT 40') as $c): ?><option value="<?= e($c['causa_falha']) ?>"><?php endforeach; ?></datalist></div><?php endif; ?>
-      <?php if ($o['plano_gatilho'] === 'contador'): ?><div class="mb-2"><label class="form-label small">Leitura do contador</label><input class="form-control" inputmode="decimal" name="leitura_contador"></div><?php endif; ?>
-      <div class="mb-2"><label class="form-label small">O que foi feito</label><textarea class="form-control" name="solucao" rows="3"><?= e(old('solucao', '')) ?></textarea></div>
+      <?php if ($o['plano_gatilho'] === 'contador'): ?><div class="mb-2"><label class="form-label small">Leitura do contador</label><input class="form-control" inputmode="decimal" name="leitura_contador" value="<?= e((string)old('leitura_contador', '')) ?>"></div><?php endif; ?>
+      <div class="mb-2"><label class="form-label small">O que foi feito</label><textarea class="form-control" name="solucao" rows="3"><?= e(old('solucao', $o['solucao'] ?? '')) ?></textarea></div>
       <input type="hidden" name="data_inicio" value="<?= e(input_dt($o['data_inicio'] ?: date('Y-m-d H:i'))) ?>">
       <?php if ($tar && count(array_filter($tar, fn($t) => !$t['concluida']))): ?>
-        <div class="form-check mb-2"><input class="form-check-input" type="checkbox" name="ignorar_tarefas" value="1" id="ig"><label class="form-check-label small" for="ig">Concluir com tarefas pendentes</label></div><?php endif; ?>
+        <div class="form-check mb-2"><input class="form-check-input" type="checkbox" name="ignorar_tarefas" value="1" id="ig" <?= old('ignorar_tarefas') ? 'checked' : '' ?>><label class="form-check-label small" for="ig">Concluir com tarefas pendentes</label></div><?php endif; ?>
       <button class="btn btn-success btn-m w-100"><i class="bi bi-check2-all"></i> Concluir agora</button>
     </form>
     <?php endif; ?>
     <a class="btn btn-link w-100" href="<?= e(url('ots/ver', ['id' => $id])) ?>">Abrir na versão completa</a>
     <?php
-    // checklist marcado via AJAX: recarrega o contador ao mudar
-    $GLOBALS['__scripts'] = '<script>document.addEventListener("change",function(e){if(e.target.matches("input[data-tarefa]")){var h=e.target.closest(".m-card").querySelector("h2");var t=e.target.closest(".m-card").querySelectorAll("input[data-tarefa]");var c=[].filter.call(t,function(x){return x.checked}).length;h.textContent="Checklist ("+c+"/"+t.length+")";}});</script>';
     m_footer(); exit;
 }
 

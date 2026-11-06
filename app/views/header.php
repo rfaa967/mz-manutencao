@@ -24,13 +24,13 @@ $cad = [
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title><?= e($titulo) ?> · <?= e(cfg('app_nome')) ?></title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
-<link href="<?= e(asset('app.css')) ?>" rel="stylesheet">
+<?= cdn_css('bootstrap@5.3.3/dist/css/bootstrap.min.css') ?>
+<?= cdn_css('bootstrap-icons@1.11.3/font/bootstrap-icons.min.css') ?>
+<link href="<?= e(asset('app.css')) ?>?v=<?= (int)@filemtime(APP_ROOT . '/public/assets/app.css') ?>" rel="stylesheet">
 <link rel="icon" href="<?= e(asset('icone.svg')) ?>">
 <meta name="csrf" content="<?= e(csrf_token()) ?>">
 </head>
-<body>
+<body<?= !empty($GLOBALS['__auto_print']) ? ' data-auto-print="1"' : '' ?>>
 <div class="d-none d-print-block mb-2 border-bottom pb-1"><strong><?= e(cfg('empresa')) ?></strong> · <?= e(cfg('app_nome')) ?> <span class="float-end small"><?= date('d/m/Y H:i') ?></span></div>
 <?php if ($u): ?>
 <nav class="navbar navbar-dark bg-dark d-lg-none px-3">
@@ -68,7 +68,7 @@ $cad = [
     </div>
   </aside>
   <main class="flex-grow-1 p-3 p-lg-4 conteudo">
-    <a href="<?= e(url('m')) ?>" class="alert alert-warning d-block d-md-none py-2 small text-decoration-none no-print"><i class="bi bi-phone"></i> Está no celular? Abra a <strong>versão mobile</strong>, com leitor de QR Code.</a>
+    <?php if (in_array($u['perfil'], ['tecnico', 'solicitante'], true)): ?><a href="<?= e(url('m')) ?>" class="alert alert-warning d-block d-md-none py-2 small text-decoration-none no-print"><i class="bi bi-phone"></i> Está no celular? Abra a <strong>versão mobile</strong>, com leitor de QR Code.</a><?php endif; ?>
 <?php else: ?>
 <main class="container py-5">
 <?php endif; ?>

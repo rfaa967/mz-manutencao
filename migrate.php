@@ -9,7 +9,7 @@ require __DIR__ . '/app/bootstrap.php';
 require __DIR__ . '/app/migracoes.php';
 
 if (in_array('--status', $argv, true)) {
-    db()->exec('CREATE TABLE IF NOT EXISTS migracoes (nome VARCHAR(120) PRIMARY KEY, aplicada_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4');
+    migracoes_tabela();
     $feitas = array_column(q('SELECT nome FROM migracoes'), 'nome');
     foreach (glob(__DIR__ . '/database/migracoes/*.sql') as $a) echo (in_array(basename($a), $feitas, true) ? '[x] ' : '[ ] ') . basename($a) . "\n";
     exit;

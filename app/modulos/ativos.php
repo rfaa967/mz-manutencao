@@ -49,8 +49,19 @@ if ($acao === 'excluir' && is_post()) {
         flash('O ativo possui histórico de OTs e foi DESATIVADO em vez de excluído.', 'warning');
         redirect('ativos/ver', ['id' => $id]);
     }
-    foreach (q('SELECT arquivo FROM ativo_documentos WHERE ativo_id = ?', [$id]) as $d) @unlink(cfg('upload_dir') . '/' . $d['arquivo']);
-    qx('DELETE FROM ativos WHERE id = ?', [$id]);
+    if (qv('SELECT COUNT(*) FROM ativos WHERE parent_id = ?', [$id])) { flash('O ativo tem componentes. Exclua ou mova os componentes antes.', 'danger'); redirect('ativos/ver', ['id' => $id]); }
+    $arquivos = array_column(q('SELECT arquivo FROM ativo_documentos WHERE ativo_id = ?', [$id]), 'arquivo');
+    db()->beginTransaction();
+    try {
+        qx('DELETE FROM planos_manutencao WHERE ativo_id = ?', [$id]);   // antes dos contadores (FK RESTRICT)
+        qx('DELETE FROM ativos WHERE id = ?', [$id]);
+        db()->commit();
+    } catch (PDOException $ex) {
+        db()->rollBack();
+        flash('Não foi possível excluir o ativo: ele ainda é referenciado por outros registros.', 'danger');
+        redirect('ativos/ver', ['id' => $id]);
+    }
+    foreach ($arquivos as $arq) @unlink(cfg('upload_dir') . '/' . basename($arq));   // só depois de excluir no banco
     auditar('excluir', 'ativos', $id);
     flash('Ativo excluído.');
     redirect('ativos');
@@ -59,11 +70,13 @@ if ($acao === 'excluir' && is_post()) {
 /* ================= DOCUMENTOS ================= */
 if ($acao === 'upload' && is_post()) {
     exigir('executar');
+    limitar_cfg('uploads_hora', 'u' . usuario()['id']);
     $id = (int)post_int('id');
     if (!qv('SELECT 1 FROM ativos WHERE id = ?', [$id])) { flash('Ativo não encontrado.', 'danger'); redirect('ativos'); }
     $f = $_FILES['arquivo'] ?? null;
     $ext = strtolower(pathinfo($f['name'] ?? '', PATHINFO_EXTENSION));
-    if (!$f || !is_array($f) || !is_string($f['name'] ?? null) || $f['error'] !== UPLOAD_ERR_OK) flash('Falha no envio do arquivo.', 'danger');
+    if ($f && is_array($f) && in_array($f['error'] ?? 0, [UPLOAD_ERR_INI_SIZE, UPLOAD_ERR_FORM_SIZE], true)) flash('Arquivo maior que o limite do servidor (upload_max_filesize = ' . ini_get('upload_max_filesize') . ').', 'danger');
+    elseif (!$f || !is_array($f) || !is_string($f['name'] ?? null) || $f['error'] !== UPLOAD_ERR_OK) flash('Falha no envio do arquivo.', 'danger');
     elseif ($f['size'] > cfg('upload_max_mb', 15) * 1048576) flash('Arquivo maior que o limite.', 'danger');
     elseif (!in_array($ext, cfg('upload_extensoes', []), true)) flash('Tipo de arquivo não permitido.', 'danger');
     else {
@@ -126,7 +139,7 @@ if ($acao === 'etiquetas') {
       @media print { .etq { border-color: #ccc; } @page { margin: 8mm; } }
     </style>
     <div class="page-title no-print"><h1>Etiquetas QR dos ativos</h1>
-      <div class="d-flex gap-2"><button class="btn btn-primary btn-sm" onclick="window.print()"><i class="bi bi-printer"></i> Imprimir</button>
+      <div class="d-flex gap-2"><button class="btn btn-primary btn-sm" data-print><i class="bi bi-printer"></i> Imprimir</button>
       <a class="btn btn-outline-secondary btn-sm" href="<?= e(url('ativos')) ?>">Voltar</a></div></div>
     <form class="card card-body py-2 mb-3 no-print" method="get"><input type="hidden" name="r" value="ativos/etiquetas"><div class="row g-2">
       <div class="col-md-4"><?= sel('loc', arvore_opcoes('localizacoes'), get('loc'), true, 'class="form-select form-select-sm"', 'Todas as localizações') ?></div>
@@ -151,7 +164,7 @@ if ($acao === 'form') {
     $id = (int)get('id', 0);
     $a = $id ? q1('SELECT * FROM ativos WHERE id = ?', [$id]) : ['criticidade' => 'B', 'status' => 'operacional', 'horas_operacao_dia' => 24, 'parent_id' => get('pai'),
         'localizacao_id' => get('pai') ? qv('SELECT localizacao_id FROM ativos WHERE id = ?', [(int)get('pai')]) : null];
-    if (!empty($_SESSION['old']) || !empty($GLOBALS['__old'])) $a = com_old($a);
+    $a = com_old($a, ['valor_aquisicao', 'horas_operacao_dia']);
     if ($id && !$a) redirect('ativos');
     view_header($id ? 'Editar ativo' : 'Novo ativo', 'ativos'); ?>
     <div class="page-title"><h1><?= $id ? 'Editar ativo' : 'Novo ativo' ?></h1>
@@ -311,25 +324,32 @@ if ($acao === 'ver') {
     <?php view_footer(); exit;
 }
 
-/* ================= LISTA / ÁRVORE ================= */
-$modo = get('modo', 'lista');
-$w = []; $p = [];
-if ($b = get('q')) { $w[] = '(a.codigo LIKE ? OR a.nome LIKE ? OR a.numero_serie LIKE ? OR a.modelo LIKE ?)'; array_push($p, "%$b%", "%$b%", "%$b%", "%$b%"); }
-if ($l = get('loc')) { $ids = descendentes('localizacoes', (int)$l); $w[] = 'a.localizacao_id IN (' . implode(',', $ids) . ')'; }
-if ($c = get('cat')) { $w[] = 'a.categoria_id = ?'; $p[] = (int)$c; }
-if ($s = get('status')) { $w[] = 'a.status = ?'; $p[] = $s; } elseif (!get('todos')) { $w[] = "a.status <> 'desativado'"; }
-if ($cr = get('crit')) { $w[] = 'a.criticidade = ?'; $p[] = $cr; }
-$where = $w ? 'WHERE ' . implode(' AND ', $w) : '';
-
-$sql = "SELECT a.*, c.nome AS categoria, l.nome AS local,
-          (SELECT COUNT(*) FROM ordens_trabalho o WHERE o.ativo_id = a.id AND o.status IN (" . STATUS_PENDENTES . ")) AS ots_abertas
-        FROM ativos a LEFT JOIN categorias_ativo c ON c.id = a.categoria_id LEFT JOIN localizacoes l ON l.id = a.localizacao_id
-        $where ORDER BY a.codigo";
-
-if (get('csv')) {
-    csv_download('ativos', ['Código', 'Nome', 'Categoria', 'Localização', 'Criticidade', 'Status', 'Fabricante', 'Modelo', 'Nº série', 'OTs abertas'],
-        array_map(fn($r) => [$r['codigo'], $r['nome'], $r['categoria'], $r['local'], $r['criticidade'], rotulo('ativo_status', $r['status']), $r['fabricante'], $r['modelo'], $r['numero_serie'], $r['ots_abertas']], q($sql, $p)));
-}
+/* ================= LISTA (tabela server-side) / ÁRVORE ================= */
+$modo = get('modo') === 'arvore' ? 'arvore' : 'lista';
+$t = new Tabela('ativos',
+    'ativos a LEFT JOIN categorias_ativo c ON c.id = a.categoria_id LEFT JOIN localizacoes l ON l.id = a.localizacao_id',
+    'a.id, a.codigo, a.nome, a.criticidade, a.status, a.fabricante, a.modelo, a.numero_serie, c.nome AS categoria, l.nome AS local,
+     (SELECT COUNT(*) FROM ordens_trabalho o WHERE o.ativo_id = a.id AND o.status IN (' . STATUS_PENDENTES . ')) AS ots_abertas', [
+    'codigo' => ['rotulo' => 'Código', 'ordem' => 'a.codigo', 'busca' => 'a.codigo', 'classe' => 'fw-semibold text-nowrap', 'render' => fn($r) => e($r['codigo'])],
+    'nome' => ['rotulo' => 'Nome', 'ordem' => 'a.nome', 'busca' => "CONCAT_WS(' ', a.nome, a.fabricante, a.modelo, a.numero_serie)",
+               'render' => fn($r) => e($r['nome']) . ($r['modelo'] ? '<div class="small text-muted">' . e(trim($r['fabricante'] . ' ' . $r['modelo'])) . '</div>' : ''), 'csv' => fn($r) => $r['nome']],
+    'categoria' => ['rotulo' => 'Categoria', 'ordem' => 'c.nome', 'busca' => 'c.nome', 'classe' => 'd-none d-md-table-cell', 'render' => fn($r) => e($r['categoria'])],
+    'local' => ['rotulo' => 'Localização', 'ordem' => 'l.nome', 'busca' => 'l.nome', 'classe' => 'd-none d-lg-table-cell', 'render' => fn($r) => e($r['local'])],
+    'crit' => ['rotulo' => 'Crit.', 'ordem' => 'a.criticidade', 'render' => fn($r) => e($r['criticidade'])],
+    'ots' => ['rotulo' => 'OTs abertas', 'ordem' => 'ots_abertas', 'classe' => 'text-center',
+              'render' => fn($r) => $r['ots_abertas'] ? '<span class="badge text-bg-warning">' . (int)$r['ots_abertas'] . '</span>' : '', 'csv' => fn($r) => (int)$r['ots_abertas']],
+    'status' => ['rotulo' => 'Status', 'ordem' => 'a.status', 'render' => fn($r) => badge('ativo_status', $r['status']), 'csv' => fn($r) => rotulo('ativo_status', $r['status'])],
+    'serie' => ['rotulo' => 'Nº série', 'classe' => 'd-none', 'render' => fn($r) => '', 'csv' => fn($r) => $r['numero_serie']],
+]);
+$t->ordemPadrao = 'codigo'; $t->desempate = 'a.id';
+$t->placeholder = 'Código, nome, modelo, série, local…';
+$t->href = fn($r) => url('ativos/ver', ['id' => $r['id']]);
+if ($l = (int)get('loc')) $t->where[] = 'a.localizacao_id IN (' . implode(',', descendentes('localizacoes', $l)) . ')';
+if ($c = (int)get('cat')) { $t->where[] = 'a.categoria_id = ?'; $t->params[] = $c; }
+if (array_key_exists((string)get('status'), ROTULOS['ativo_status'])) { $t->where[] = 'a.status = ?'; $t->params[] = get('status'); }
+else $t->where[] = "a.status <> 'desativado'";
+if (in_array(get('crit'), ['A', 'B', 'C'], true)) { $t->where[] = 'a.criticidade = ?'; $t->params[] = get('crit'); }
+if ($modo === 'lista') $t->responder('ativos');
 
 view_header('Ativos', 'ativos'); ?>
 <div class="page-title"><h1>Ativos / Equipamentos</h1>
@@ -338,7 +358,6 @@ view_header('Ativos', 'ativos'); ?>
       <a class="btn btn-outline-secondary <?= $modo === 'lista' ? 'active' : '' ?>" href="<?= e(url('ativos', ['modo' => 'lista'] + array_diff_key($_GET, ['r' => 1, 'modo' => 1]))) ?>"><i class="bi bi-list-ul"></i> Lista</a>
       <a class="btn btn-outline-secondary <?= $modo === 'arvore' ? 'active' : '' ?>" href="<?= e(url('ativos', ['modo' => 'arvore'])) ?>"><i class="bi bi-diagram-3"></i> Árvore</a>
     </div>
-    <a class="btn btn-outline-secondary btn-sm" href="?<?= e(http_build_query($_GET + ['csv' => 1])) ?>"><i class="bi bi-filetype-csv"></i> CSV</a>
     <a class="btn btn-outline-secondary btn-sm" href="<?= e(url('ativos/etiquetas', array_filter(['loc' => get('loc'), 'cat' => get('cat'), 'crit' => get('crit')]))) ?>"><i class="bi bi-qr-code"></i> Etiquetas QR</a>
     <?php if (pode('gerir')): ?><a class="btn btn-warning btn-sm" href="<?= e(url('ativos/form')) ?>"><i class="bi bi-plus-lg"></i> Novo ativo</a><?php endif; ?>
   </div>
@@ -374,24 +393,15 @@ view_header('Ativos', 'ativos'); ?>
     <div class="card"><div class="card-body arvore">
       <?php $rLoc(0); if (!empty($atPorLoc[0])) { echo '<div class="mt-2 text-muted small">Sem localização</div>'; $rAt($atPorLoc[0]); } ?>
     </div></div>
-<?php else:
-    $pg = paginar($sql, $p, 30); ?>
+<?php else: ?>
     <form class="card card-body mb-3 py-2" method="get"><input type="hidden" name="r" value="ativos">
       <div class="row g-2">
-        <div class="col-md-3"><input class="form-control form-control-sm" name="q" placeholder="Código, nome, série, modelo…" value="<?= e(get('q')) ?>"></div>
-        <div class="col-md-3"><?= sel('loc', $locs, get('loc'), true, 'onchange="this.form.submit()"') ?></div>
-        <div class="col-md-2"><?= sel('cat', $cats, get('cat'), true, 'onchange="this.form.submit()"') ?></div>
-        <div class="col-md-2"><?= sel('status', lista_rotulos('ativo_status'), get('status'), true, 'onchange="this.form.submit()"') ?></div>
-        <div class="col-md-1"><?= sel('crit', ['A' => 'A', 'B' => 'B', 'C' => 'C'], get('crit'), true, 'onchange="this.form.submit()"') ?></div>
-        <div class="col-md-1"><button class="btn btn-sm btn-secondary w-100">Filtrar</button></div>
+        <div class="col-md-4"><?= sel('loc', $locs, get('loc'), true, 'class="form-select form-select-sm" aria-label="Localização" data-auto-submit', 'Todas as localizações') ?></div>
+        <div class="col-md-3"><?= sel('cat', $cats, get('cat'), true, 'class="form-select form-select-sm" aria-label="Categoria" data-auto-submit', 'Todas as categorias') ?></div>
+        <div class="col-md-3"><?= sel('status', lista_rotulos('ativo_status'), get('status'), true, 'class="form-select form-select-sm" aria-label="Status" data-auto-submit', 'Ativos em uso') ?></div>
+        <div class="col-md-2"><?= sel('crit', ['A' => 'Criticidade A', 'B' => 'Criticidade B', 'C' => 'Criticidade C'], get('crit'), true, 'class="form-select form-select-sm" aria-label="Criticidade" data-auto-submit', 'Toda criticidade') ?></div>
       </div>
     </form>
-    <div class="card"><div class="table-responsive"><table class="table table-hover mb-0">
-      <thead><tr><th>Código</th><th>Nome</th><th>Categoria</th><th>Localização</th><th>Crit.</th><th>OTs abertas</th><th>Status</th></tr></thead><tbody>
-      <?php foreach ($pg['linhas'] as $r): ?>
-        <tr data-href="<?= e(url('ativos/ver', ['id' => $r['id']])) ?>"><td class="fw-semibold"><?= e($r['codigo']) ?></td><td><?= e($r['nome']) ?></td><td><?= e($r['categoria']) ?></td>
-        <td><?= e($r['local']) ?></td><td><?= e($r['criticidade']) ?></td><td><?= $r['ots_abertas'] ? '<span class="badge text-bg-warning">' . $r['ots_abertas'] . '</span>' : '' ?></td><td><?= badge('ativo_status', $r['status']) ?></td></tr>
-      <?php endforeach; if (!$pg['linhas']): ?><tr><td colspan="7" class="text-center text-muted py-4">Nenhum ativo encontrado.</td></tr><?php endif; ?>
-      </tbody></table></div><div class="card-footer bg-white"><?= paginacao_html($pg) ?></div></div>
+    <?= $t->html() ?>
 <?php endif;
 view_footer();

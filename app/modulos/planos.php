@@ -47,7 +47,10 @@ if ($acao === 'salvar' && is_post()) {
         $dados['periodicidade'] = max(1, (int)post('periodicidade'));
         $dados['unidade_periodo'] = array_key_exists((string)post('unidade_periodo'), $unidades) ? post('unidade_periodo') : 'mes';
         $dados['proxima_data'] = post_date('proxima_data') ?? date('Y-m-d');
-        $dados['dia_ancora'] = (int)substr($dados['proxima_data'], 8, 2);
+        $ant = $id ? q1('SELECT proxima_data, dia_ancora FROM planos_manutencao WHERE id = ?', [$id]) : null;
+        $dados['dia_ancora'] = ($ant && $ant['dia_ancora'] && $ant['proxima_data'] === $dados['proxima_data'])
+            ? (int)$ant['dia_ancora']                              // data não mudou: mantém o dia original (31 → 28 → 31)
+            : (int)substr($dados['proxima_data'], 8, 2);
         if ($dados['antecedencia_dias'] >= periodo_em_dias($dados['periodicidade'], $dados['unidade_periodo'])) {
             flash('A antecedência precisa ser menor que a periodicidade; do contrário, cada conclusão geraria a OT seguinte imediatamente.', 'danger');
             redirect('planos/form', $id ? ['id' => $id] : ['ativo' => $dados['ativo_id']]);
@@ -108,7 +111,7 @@ if ($acao === 'form') {
         'ativo_id' => get('ativo'), 'tipo' => 'preventiva', 'gatilho' => 'tempo', 'periodicidade' => 1, 'unidade_periodo' => 'mes',
         'base_calculo' => 'fixa', 'antecedencia_dias' => 7, 'prioridade' => 'media', 'ativo' => 1, 'proxima_data' => date('Y-m-d'),
     ];
-    if (!empty($_SESSION['old']) || !empty($GLOBALS['__old'])) $p = com_old($p);
+    $p = com_old($p, ['intervalo_contador', 'proximo_valor', 'duracao_estimada'], ['ativo']);
     if ($id && !$p) redirect('planos');
     $tarefas = $id ? q('SELECT * FROM plano_tarefas WHERE plano_id = ? ORDER BY ordem', [$id]) : [];
     $materiais = $id ? q('SELECT * FROM plano_materiais WHERE plano_id = ?', [$id]) : [];
@@ -127,7 +130,7 @@ if ($acao === 'form') {
     <div class="row g-3">
       <div class="col-lg-8">
         <div class="card mb-3"><div class="card-body"><div class="row g-3">
-          <div class="col-md-7"><label class="form-label">Ativo *</label><?= sel('ativo_id', arvore_opcoes('ativos'), $p['ativo_id'], true, 'required onchange="carregarContadores(this.value)"') ?></div>
+          <div class="col-md-7"><label class="form-label">Ativo *</label><?= sel('ativo_id', arvore_opcoes('ativos'), $p['ativo_id'], true, 'required data-contadores-url="' . e(url('planos/contadores')) . '" data-contadores-alvo="f_contador_id"') ?></div>
           <div class="col-md-5"><label class="form-label">Tipo</label><?= sel('tipo', $tiposPlano, $p['tipo'], false) ?></div>
           <div class="col-12"><label class="form-label">Título *</label><input class="form-control" name="titulo" required value="<?= e($p['titulo'] ?? '') ?>" placeholder="Ex.: Preventiva mensal — troca de filtros"></div>
           <div class="col-12"><label class="form-label">Instruções</label><textarea class="form-control" name="descricao" rows="3"><?= e($p['descricao'] ?? '') ?></textarea></div>
@@ -197,50 +200,62 @@ if ($acao === 'form') {
     <?php if ($id && pode('gerir')): ?>
       <form method="post" action="<?= e(url('planos/excluir')) ?>" class="text-end" data-confirm="Excluir este plano?"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $id ?>"><button class="btn btn-link text-danger btn-sm">Excluir plano</button></form>
     <?php endif;
-    $GLOBALS['__scripts'] = '<script>function carregarContadores(a){fetch(' . json_encode(url('planos/contadores')) . '+"&ativo="+encodeURIComponent(a)).then(r=>r.json()).then(l=>{const s=document.getElementById("f_contador_id");'
-        . 's.replaceChildren(new Option("— selecione —",""),...l.map(c=>new Option(c.nome+" (atual "+c.valor_atual+" "+c.unidade+")",c.id)));})}</script>';
     view_footer(); exit;
 }
 
-/* ---------- Lista ---------- */
-$w = ['1=1']; $prm = [];
-if (!get('inativos')) $w[] = 'p.ativo = 1';
-if ($b = get('q')) { $w[] = '(p.titulo LIKE ? OR a.codigo LIKE ? OR a.nome LIKE ?)'; array_push($prm, "%$b%", "%$b%", "%$b%"); }
-$planos = q('SELECT p.*, a.codigo, a.nome AS ativo_nome, c.valor_atual, c.unidade, t.nome AS responsavel,
-               (SELECT COUNT(*) FROM ordens_trabalho o WHERE o.plano_id=p.id AND o.status IN (' . STATUS_PENDENTES . ')) AS pendente
-             FROM planos_manutencao p JOIN ativos a ON a.id=p.ativo_id LEFT JOIN contadores c ON c.id=p.contador_id LEFT JOIN tecnicos t ON t.id=p.responsavel_id
-             WHERE ' . implode(' AND ', $w) . ' ORDER BY p.proxima_data IS NULL, p.proxima_data, a.codigo', $prm);
+/* ---------- Lista (tabela server-side) ---------- */
 $hoje = date('Y-m-d');
+$periodo = function (array $p) use ($unidadesTxt): string {
+    if ($p['gatilho'] !== 'tempo') return 'A cada ' . num($p['intervalo_contador'], 0) . ' ' . $p['unidade'];
+    $n = (int)$p['periodicidade']; $ut = $unidadesTxt[$p['unidade_periodo']] ?? ['', ''];
+    return $n === 1 ? ($p['unidade_periodo'] === 'semana' ? 'Toda ' : 'Todo ') . $ut[0] : "A cada $n {$ut[1]}";
+};
+$situacao = function (array $p) use ($hoje): array {
+    if (!$p['ativo']) return ['inativo', 'secondary'];
+    if ($p['pendente']) return ['OT gerada', 'info'];
+    if ($p['gatilho'] === 'tempo') {
+        $venc = $p['proxima_data'] && $p['proxima_data'] < $hoje;
+        $gerar = $p['proxima_data'] && $p['proxima_data'] <= date('Y-m-d', strtotime('+' . (int)$p['antecedencia_dias'] . ' days'));
+    } else {
+        $venc = (float)$p['valor_atual'] >= (float)$p['proximo_valor'];
+        $gerar = (float)$p['valor_atual'] >= (float)$p['proximo_valor'] - (float)$p['antecedencia_dias'];
+    }
+    return $venc ? ['vencido', 'danger'] : ($gerar ? ['a gerar', 'warning'] : ['em dia', 'success']);
+};
+$t = new Tabela('planos',
+    'planos_manutencao p JOIN ativos a ON a.id = p.ativo_id LEFT JOIN contadores c ON c.id = p.contador_id LEFT JOIN tecnicos t ON t.id = p.responsavel_id',
+    'p.*, a.codigo, a.nome AS ativo_nome, c.valor_atual, c.unidade, t.nome AS responsavel,
+     EXISTS(SELECT 1 FROM ordens_trabalho o WHERE o.plano_id = p.id AND o.status IN (' . STATUS_PENDENTES . ')) AS pendente', [
+    'ativo' => ['rotulo' => 'Ativo', 'ordem' => 'a.codigo', 'busca' => "CONCAT_WS(' ', a.codigo, a.nome)", 'classe' => 'text-nowrap', 'render' => fn($p) => '<span title="' . e($p['ativo_nome']) . '">' . e($p['codigo']) . '</span>'],
+    'titulo' => ['rotulo' => 'Plano', 'ordem' => 'p.titulo', 'busca' => 'p.titulo', 'render' => fn($p) => e($p['titulo'])],
+    'tipo' => ['rotulo' => 'Tipo', 'ordem' => 'p.tipo', 'classe' => 'd-none d-md-table-cell', 'render' => fn($p) => badge('tipo_ot', $p['tipo']), 'csv' => fn($p) => rotulo('tipo_ot', $p['tipo'])],
+    'periodo' => ['rotulo' => 'Periodicidade', 'classe' => 'd-none d-lg-table-cell', 'render' => fn($p) => e($periodo($p)), 'csv' => $periodo],
+    'ultima' => ['rotulo' => 'Última', 'ordem' => 'p.ultima_execucao', 'classe' => 'd-none d-md-table-cell', 'render' => fn($p) => dt($p['ultima_execucao'])],
+    'proxima' => ['rotulo' => 'Próxima', 'ordem' => "COALESCE(p.proxima_data, '9999-12-31')", 'classe' => 'text-nowrap',
+                  'render' => fn($p) => $p['gatilho'] === 'tempo' ? dt($p['proxima_data'])
+                      : num($p['proximo_valor'], 0) . ' ' . e($p['unidade']) . ' <small class="text-muted">(atual ' . num($p['valor_atual'], 0) . ')</small>',
+                  'csv' => fn($p) => $p['gatilho'] === 'tempo' ? dt($p['proxima_data']) : num($p['proximo_valor'], 0) . ' ' . $p['unidade']],
+    'resp' => ['rotulo' => 'Responsável', 'ordem' => 't.nome', 'busca' => 't.nome', 'classe' => 'd-none d-lg-table-cell', 'render' => fn($p) => e($p['responsavel'])],
+    'situacao' => ['rotulo' => 'Situação', 'render' => function ($p) use ($situacao) { [$r, $c] = $situacao($p); return '<span class="badge text-bg-' . $c . '">' . e($r) . '</span>'; },
+                   'csv' => fn($p) => $situacao($p)[0]],
+]);
+$t->ordemPadrao = 'proxima'; $t->desempate = 'p.id';
+$t->placeholder = 'Plano, ativo, responsável…';
+$t->href = fn($p) => url('planos/form', ['id' => $p['id']]);
+$t->vazio = 'Nenhum plano cadastrado.';
+if (!get('inativos')) $t->where[] = 'p.ativo = 1';
+$t->responder('planos');
 
 view_header('Planos preventivos', 'planos'); ?>
 <div class="page-title"><h1>Planos de manutenção preventiva</h1>
-  <div class="d-flex gap-2">
-    <form method="get" class="d-flex"><input type="hidden" name="r" value="planos"><input class="form-control form-control-sm" name="q" placeholder="Buscar…" value="<?= e(get('q')) ?>"></form>
+  <div class="d-flex gap-2 flex-wrap">
+    <a class="btn btn-outline-secondary btn-sm <?= get('inativos') ? 'active' : '' ?>" href="<?= e(url('planos', get('inativos') ? [] : ['inativos' => 1])) ?>"><?= get('inativos') ? 'Ocultar inativos' : 'Mostrar inativos' ?></a>
     <?php if (pode('gerir')): ?>
       <form method="post" action="<?= e(url('planos/gerar')) ?>"><?= csrf_field() ?><button class="btn btn-success btn-sm"><i class="bi bi-lightning-charge"></i> Gerar OTs vencidas</button></form>
       <a class="btn btn-warning btn-sm" href="<?= e(url('planos/form')) ?>"><i class="bi bi-plus-lg"></i> Novo plano</a>
     <?php endif; ?>
   </div>
 </div>
-<div class="card"><div class="table-responsive"><table class="table table-hover table-sm mb-0">
-<thead><tr><th>Ativo</th><th>Plano</th><th>Tipo</th><th>Periodicidade</th><th>Última</th><th>Próxima</th><th>Responsável</th><th>Situação</th></tr></thead><tbody>
-<?php foreach ($planos as $p):
-    if ($p['gatilho'] === 'tempo') {
-        $nP = (int)$p['periodicidade']; $ut = $unidadesTxt[$p['unidade_periodo']] ?? ['', ''];
-        $per = $nP === 1 ? ($p['unidade_periodo'] === 'semana' ? 'Toda ' : 'Todo ') . $ut[0] : 'A cada ' . $nP . ' ' . $ut[1];
-        $prox = dt($p['proxima_data']);
-        $venc = $p['proxima_data'] && $p['proxima_data'] < $hoje;
-        $prox_ = $p['proxima_data'] && $p['proxima_data'] <= date('Y-m-d', strtotime('+' . (int)$p['antecedencia_dias'] . ' days'));
-    } else {
-        $per = 'A cada ' . num($p['intervalo_contador'], 0) . ' ' . e($p['unidade']);
-        $prox = num($p['proximo_valor'], 0) . ' ' . e($p['unidade']) . ' <small class="text-muted">(atual ' . num($p['valor_atual'], 0) . ')</small>';
-        $venc = (float)$p['valor_atual'] >= (float)$p['proximo_valor'];
-        $prox_ = (float)$p['valor_atual'] >= (float)$p['proximo_valor'] - (float)$p['antecedencia_dias'];
-    }
-    $sit = !$p['ativo'] ? '<span class="badge text-bg-secondary">inativo</span>' : ($p['pendente'] ? '<span class="badge text-bg-info">OT gerada</span>' : ($venc ? '<span class="badge text-bg-danger">vencido</span>' : ($prox_ ? '<span class="badge text-bg-warning">a gerar</span>' : '<span class="badge text-bg-success">em dia</span>'))); ?>
-  <tr data-href="<?= e(url('planos/form', ['id' => $p['id']])) ?>"><td class="text-nowrap"><?= e($p['codigo']) ?></td><td><?= e($p['titulo']) ?></td><td><?= badge('tipo_ot', $p['tipo']) ?></td>
-  <td><?= $per ?></td><td><?= dt($p['ultima_execucao']) ?></td><td><?= $prox ?></td><td><?= e($p['responsavel']) ?></td><td><?= $sit ?></td></tr>
-<?php endforeach; if (!$planos): ?><tr><td colspan="8" class="text-center text-muted py-4">Nenhum plano cadastrado.</td></tr><?php endif; ?>
-</tbody></table></div></div>
+<?= $t->html() ?>
 <p class="small text-muted mt-2">Configure o cron diário (<code>php cron/gerar_preventivas.php</code>) para gerar as OTs automaticamente; o botão acima faz o mesmo sob demanda.</p>
 <?php view_footer();

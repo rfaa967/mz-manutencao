@@ -142,4 +142,7 @@ function serie_mensal(string $fim, int $meses = 12): array
     return $out;
 }
 
-function chart_js(): string { return '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>'; }
+function chart_js(): string { return cdn_js('chart.js@4.4.4/dist/chart.umd.min.js'); }
+
+/** Atributo data-grafico com a configuração do Chart.js (escapado para HTML; o app.js desenha). */
+function grafico_attr(array $cfg): string { return 'data-grafico="' . e(json_encode($cfg, JSON_UNESCAPED_UNICODE)) . '"'; }

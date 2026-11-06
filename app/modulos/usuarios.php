@@ -20,7 +20,10 @@ if ($acao === 'salvar' && is_post()) {
         $dados['senha_hash'] = password_hash($senha, PASSWORD_DEFAULT);
     }
     try {
-        if ($id) { update('usuarios', $dados, $id); auditar('editar', 'usuarios', $id); }
+        if ($id) {
+            update('usuarios', $dados, $id); auditar('editar', 'usuarios', $id);
+            if ($id === usuario()['id'] && isset($dados['senha_hash'])) sessao_renovar_senha($dados['senha_hash']); // não derruba a própria sessão
+        }
         else { $id = insert('usuarios', $dados); auditar('criar', 'usuarios', $id); }
         flash('Usuário salvo.');
     } catch (PDOException $ex) {
@@ -33,7 +36,7 @@ if ($acao === 'salvar' && is_post()) {
 if ($acao === 'form') {
     $id = (int)get('id', 0);
     $r = $id ? q1('SELECT * FROM usuarios WHERE id = ?', [$id]) : ['ativo' => 1, 'perfil' => 'solicitante', 'receber_emails' => 1];
-    if (!empty($_SESSION['old']) || !empty($GLOBALS['__old'])) $r = com_old($r);
+    $r = com_old($r, [], ['ativo', 'receber_emails']);
     view_header('Usuário', 'usuarios'); ?>
     <div class="page-title"><h1><?= $id ? 'Editar usuário' : 'Novo usuário' ?></h1><a class="btn btn-outline-secondary btn-sm" href="<?= e(url('usuarios')) ?>">Voltar</a></div>
     <div class="card"><div class="card-body">
@@ -53,13 +56,20 @@ if ($acao === 'form') {
     <?php view_footer(); exit;
 }
 
-$linhas = q('SELECT u.*, t.nome AS tecnico FROM usuarios u LEFT JOIN tecnicos t ON t.id = u.tecnico_id ORDER BY u.nome');
+$t = new Tabela('usuarios', 'usuarios u LEFT JOIN tecnicos t ON t.id = u.tecnico_id',
+    'u.id, u.nome, u.email, u.perfil, u.ativo, u.ultimo_login, u.receber_emails, t.nome AS tecnico', [
+    'nome' => ['rotulo' => 'Nome', 'ordem' => 'u.nome', 'busca' => 'u.nome', 'render' => fn($l) => e($l['nome'])],
+    'email' => ['rotulo' => 'E-mail', 'ordem' => 'u.email', 'busca' => 'u.email', 'render' => fn($l) => e($l['email'])],
+    'perfil' => ['rotulo' => 'Perfil', 'ordem' => "FIELD(u.perfil, 'admin', 'gestor', 'tecnico', 'solicitante')", 'render' => fn($l) => badge('perfil', $l['perfil']), 'csv' => fn($l) => rotulo('perfil', $l['perfil'])],
+    'tecnico' => ['rotulo' => 'Técnico', 'ordem' => 't.nome', 'busca' => 't.nome', 'classe' => 'd-none d-md-table-cell', 'render' => fn($l) => e($l['tecnico'])],
+    'acesso' => ['rotulo' => 'Último acesso', 'ordem' => 'u.ultimo_login', 'classe' => 'd-none d-md-table-cell text-nowrap', 'render' => fn($l) => dt($l['ultimo_login'], true)],
+    'status' => ['rotulo' => 'Status', 'ordem' => 'u.ativo', 'render' => fn($l) => $l['ativo'] ? 'Ativo' : '<span class="text-muted">Inativo</span>', 'csv' => fn($l) => $l['ativo'] ? 'Ativo' : 'Inativo'],
+]);
+$t->ordemPadrao = 'nome'; $t->desempate = 'u.id';
+$t->placeholder = 'Nome, e-mail, técnico…';
+$t->href = fn($l) => url('usuarios/form', ['id' => $l['id']]);
+$t->responder('usuarios');
 view_header('Usuários', 'usuarios'); ?>
 <div class="page-title"><h1>Usuários</h1><a class="btn btn-warning btn-sm" href="<?= e(url('usuarios/form')) ?>"><i class="bi bi-plus-lg"></i> Novo</a></div>
-<div class="card"><div class="table-responsive"><table class="table table-hover mb-0">
-<thead><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Técnico</th><th>Último acesso</th><th>Status</th></tr></thead><tbody>
-<?php foreach ($linhas as $l): ?>
-<tr data-href="<?= e(url('usuarios/form', ['id' => $l['id']])) ?>"><td><?= e($l['nome']) ?></td><td><?= e($l['email']) ?></td><td><?= badge('perfil', $l['perfil']) ?></td>
-<td><?= e($l['tecnico']) ?></td><td><?= dt($l['ultimo_login'], true) ?></td><td><?= $l['ativo'] ? 'Ativo' : '<span class="text-muted">Inativo</span>' ?></td></tr>
-<?php endforeach; ?></tbody></table></div></div>
+<?= $t->html() ?>
 <?php view_footer();

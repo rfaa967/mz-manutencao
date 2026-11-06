@@ -6,6 +6,8 @@ function pedido_visivel(array $p): bool { return pode('ver') || (int)$p['solicit
 
 /* ---------- Criar ---------- */
 if ($acao === 'salvar' && is_post()) {
+    limitar_cfg('pedidos_hora', 'u' . $u['id']);
+    if ($erroTs = turnstile_validar('pedido')) { flash($erroTs, 'danger'); redirect_m('m/pedido', ['ativo' => post_int('ativo_id')]); redirect('pedidos/form', ['ativo' => post_int('ativo_id')]); }
     $titulo = mb_substr((string)post('titulo'), 0, 150);
     $ativoId = post_int('ativo_id');
     $locId = post_int('localizacao_id');
@@ -98,6 +100,7 @@ if ($acao === 'form') {
         <div class="col-md-8 d-flex align-items-end"><div class="form-check"><input class="form-check-input" type="checkbox" name="ativo_parado" value="1" id="parado">
           <label class="form-check-label" for="parado">O equipamento está <strong>parado</strong> / sem condições de uso</label></div></div>
       </div>
+      <div class="mt-3"><?= turnstile_widget('pedido', true) ?></div>
       <button class="btn btn-danger mt-3"><i class="bi bi-send"></i> Enviar pedido</button>
     </form></div></div>
     <?php view_footer(); exit;
@@ -136,7 +139,7 @@ if ($acao === 'ver') {
             <div class="col-6"><label class="form-label">Prioridade</label><?= sel('prioridade', lista_rotulos('prioridade'), $p['prioridade'], false) ?></div>
             <div class="col-6"><label class="form-label">Responsável</label><?= sel('responsavel_id', opcoes('SELECT id, nome FROM tecnicos WHERE ativo=1 ORDER BY nome')) ?></div>
             <div class="col-6"><label class="form-label">Data prevista</label><input type="date" class="form-control" name="data_prevista" value="<?= date('Y-m-d') ?>"></div>
-            <div class="col-12"><label class="form-label">Comentário / resposta ao solicitante <span class="text-muted fw-normal">(obrigatório para rejeitar)</span></label><textarea class="form-control" name="resposta" rows="2"></textarea></div>
+            <div class="col-12"><label class="form-label">Comentário / resposta ao solicitante <span class="text-muted fw-normal">(obrigatório para rejeitar)</span></label><textarea class="form-control" name="resposta" rows="2"><?= e((string)old('resposta', '')) ?></textarea></div>
           </div>
           <div class="d-flex gap-2 mt-3">
             <button class="btn btn-success" name="decisao" value="aprovar"><i class="bi bi-check2-circle"></i> Aprovar e gerar OT</button>
@@ -149,32 +152,37 @@ if ($acao === 'ver') {
     <?php view_footer(); exit;
 }
 
-/* ---------- Lista ---------- */
-$w = []; $prm = [];
-if (!pode('ver')) { $w[] = 'p.solicitante_id = ?'; $prm[] = $u['id']; }
-$st = get('status', pode('gerir') ? 'aberto' : '');
-if ($st && $st !== 'todos') { $w[] = 'p.status = ?'; $prm[] = $st; }
-if ($b = get('q')) { $w[] = '(p.numero LIKE ? OR p.titulo LIKE ? OR a.codigo LIKE ?)'; array_push($prm, "%$b%", "%$b%", "%$b%"); }
-$sql = 'SELECT p.*, a.codigo, a.nome AS ativo, us.nome AS solicitante FROM pedidos p LEFT JOIN ativos a ON a.id=p.ativo_id JOIN usuarios us ON us.id=p.solicitante_id '
-     . ($w ? 'WHERE ' . implode(' AND ', $w) : '') . " ORDER BY FIELD(p.status,'aberto','aprovado','convertido','rejeitado'), FIELD(p.prioridade,'urgente','alta','media','baixa'), p.criado_em DESC";
-$pg = paginar($sql, $prm);
+/* ---------- Lista (tabela server-side) ---------- */
+$st = in_array(get('status'), ['aberto', 'convertido', 'rejeitado', 'todos'], true) ? get('status') : (pode('gerir') ? 'aberto' : 'todos');
+$t = new Tabela('pedidos',
+    'pedidos p LEFT JOIN ativos a ON a.id = p.ativo_id JOIN usuarios us ON us.id = p.solicitante_id',
+    'p.id, p.numero, p.titulo, p.prioridade, p.status, p.ativo_parado, p.criado_em, a.codigo, a.nome AS ativo, us.nome AS solicitante', [
+    'numero' => ['rotulo' => 'Nº', 'ordem' => 'p.id', 'busca' => 'p.numero', 'classe' => 'text-nowrap', 'render' => fn($l) => e($l['numero'])],
+    'titulo' => ['rotulo' => 'Título', 'ordem' => 'p.titulo', 'busca' => 'p.titulo',
+                 'render' => fn($l) => e($l['titulo']) . ($l['ativo_parado'] ? ' <i class="bi bi-sign-stop-fill text-danger" title="Equipamento parado" aria-label="Equipamento parado"></i>' : ''), 'csv' => fn($l) => $l['titulo']],
+    'ativo' => ['rotulo' => 'Ativo', 'ordem' => 'a.codigo', 'busca' => "CONCAT_WS(' ', a.codigo, a.nome)", 'classe' => 'd-none d-md-table-cell', 'render' => fn($l) => e($l['codigo'])],
+    'solicitante' => ['rotulo' => 'Solicitante', 'ordem' => 'us.nome', 'busca' => 'us.nome', 'classe' => 'd-none d-lg-table-cell', 'render' => fn($l) => e($l['solicitante'])],
+    'data' => ['rotulo' => 'Data', 'ordem' => 'p.criado_em', 'classe' => 'text-nowrap', 'render' => fn($l) => dt($l['criado_em'], true)],
+    'urgencia' => ['rotulo' => 'Urgência', 'ordem' => "FIELD(p.prioridade, 'urgente', 'alta', 'media', 'baixa')", 'classe' => 'd-none d-md-table-cell',
+                   'render' => fn($l) => badge('prioridade', $l['prioridade']), 'csv' => fn($l) => rotulo('prioridade', $l['prioridade'])],
+    'status' => ['rotulo' => 'Status', 'ordem' => "FIELD(p.status, 'aberto', 'aprovado', 'convertido', 'rejeitado')", 'render' => fn($l) => badge('ped_status', $l['status']), 'csv' => fn($l) => rotulo('ped_status', $l['status'])],
+]);
+$t->desempate = 'p.id';
+// padrão: urgência primeiro nos abertos; nos demais, mais recentes primeiro
+if ($st === 'aberto') { $t->ordemPadrao = 'urgencia'; $t->dirPadrao = 'asc'; } else { $t->ordemPadrao = 'data'; $t->dirPadrao = 'desc'; }
+$t->placeholder = 'Nº, título, ativo, solicitante…';
+$t->href = fn($l) => url('pedidos/ver', ['id' => $l['id']]);
+$t->vazio = 'Nenhum pedido.';
+if (!pode('ver')) { $t->where[] = 'p.solicitante_id = ?'; $t->params[] = $u['id']; unset($t->colunas['solicitante']); }
+if ($st !== 'todos') { $t->where[] = 'p.status = ?'; $t->params[] = $st; }
+$t->responder('pedidos');
 
 view_header('Pedidos de trabalho', 'pedidos'); ?>
 <div class="page-title"><h1>Pedidos de trabalho</h1><a class="btn btn-danger btn-sm" href="<?= e(url('pedidos/form')) ?>"><i class="bi bi-plus-lg"></i> Novo pedido</a></div>
-<div class="d-flex flex-wrap gap-2 mb-3 align-items-center">
-  <div class="btn-group btn-group-sm">
-    <?php foreach (['aberto' => 'Abertos', 'convertido' => 'Convertidos', 'rejeitado' => 'Rejeitados', 'todos' => 'Todos'] as $k => $r): ?>
-      <a class="btn btn-outline-secondary <?= ($st ?: 'todos') === $k ? 'active' : '' ?>" href="<?= e(url('pedidos', ['status' => $k])) ?>"><?= $r ?></a>
-    <?php endforeach; ?>
-  </div>
-  <form method="get" class="ms-auto"><input type="hidden" name="r" value="pedidos"><input type="hidden" name="status" value="<?= e($st) ?>">
-    <input class="form-control form-control-sm" name="q" placeholder="Buscar…" value="<?= e(get('q')) ?>"></form>
+<div class="btn-group btn-group-sm mb-3 flex-wrap" role="group" aria-label="Situação">
+  <?php foreach (['aberto' => 'Abertos', 'convertido' => 'Convertidos', 'rejeitado' => 'Rejeitados', 'todos' => 'Todos'] as $k => $r): ?>
+    <a class="btn btn-outline-secondary <?= $st === $k ? 'active' : '' ?>" href="<?= e(url('pedidos', ['status' => $k])) ?>"><?= $r ?></a>
+  <?php endforeach; ?>
 </div>
-<div class="card"><div class="table-responsive"><table class="table table-hover mb-0">
-<thead><tr><th>Nº</th><th>Título</th><th>Ativo</th><th>Solicitante</th><th>Data</th><th>Urgência</th><th>Status</th></tr></thead><tbody>
-<?php foreach ($pg['linhas'] as $l): ?>
-  <tr data-href="<?= e(url('pedidos/ver', ['id' => $l['id']])) ?>"><td><?= e($l['numero']) ?></td><td><?= e($l['titulo']) ?> <?= $l['ativo_parado'] ? '<i class="bi bi-sign-stop-fill text-danger" title="Parado"></i>' : '' ?></td>
-  <td><?= e($l['codigo']) ?></td><td><?= e($l['solicitante']) ?></td><td><?= dt($l['criado_em'], true) ?></td><td><?= badge('prioridade', $l['prioridade']) ?></td><td><?= badge('ped_status', $l['status']) ?></td></tr>
-<?php endforeach; if (!$pg['linhas']): ?><tr><td colspan="7" class="text-center text-muted py-4">Nenhum pedido.</td></tr><?php endif; ?>
-</tbody></table></div><div class="card-footer bg-white"><?= paginacao_html($pg) ?></div></div>
+<?= $t->html() ?>
 <?php view_footer();

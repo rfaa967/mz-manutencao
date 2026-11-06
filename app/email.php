@@ -8,11 +8,23 @@ declare(strict_types=1);
  *  - Transporte SMTP próprio (STARTTLS/SSL, AUTH LOGIN) ou mail() do PHP — sem dependências externas.
  */
 
-function email_ativo(): bool { return (bool)cfg('email.ativo', false); }
+function email_ativo(): bool
+{
+    if (!cfg('email.ativo', false)) return false;
+    if (trim((string)cfg('app_url', '')) === '') {
+        // sem app_url os links sairiam do cabeçalho da requisição (manipulável) — não envia
+        error_log('[MZManut] e-mail desativado: defina app_url no config.php');
+        return false;
+    }
+    return true;
+}
 
 function email_enfileirar(array|string $para, string $assunto, string $html, string $evento = ''): int
 {
-    if (!email_ativo()) return 0;
+    if (!email_ativo() || !empty($GLOBALS['__sem_email'])) return 0;
+    // quem executou a ação não recebe aviso dela (ex.: gestor que abriu e aprovou o próprio pedido)
+    $eu = mb_strtolower((string)(usuario()['email'] ?? ''));
+    $para = array_filter((array)$para, fn($x) => mb_strtolower(trim((string)$x)) !== $eu);
     $n = 0;
     foreach (array_unique(array_filter((array)$para)) as $dest) {
         $dest = trim((string)$dest);
@@ -23,6 +35,7 @@ function email_enfileirar(array|string $para, string $assunto, string $html, str
     if ($n && cfg('email.envio_imediato', false) && PHP_SAPI !== 'cli' && empty($GLOBALS['__email_shutdown'])) {
         $GLOBALS['__email_shutdown'] = true;
         register_shutdown_function(function () {
+            if (session_status() === PHP_SESSION_ACTIVE) session_write_close();       // não prende a sessão durante o SMTP
             if (function_exists('fastcgi_finish_request')) fastcgi_finish_request(); // responde ao usuário antes de enviar
             try { email_processar_fila(10); } catch (Throwable $ex) { error_log('[MZManut e-mail] ' . $ex->getMessage()); }
         });
@@ -36,7 +49,7 @@ function email_processar_fila(int $limite = 50): array
     $ok = 0; $err = 0;
     // "reserva" as linhas para evitar envio duplicado se dois processos rodarem juntos
     $token = bin2hex(random_bytes(6));
-    qx("UPDATE fila_emails SET erro = ? WHERE status = 'pendente' AND tentativas < 5 AND (erro IS NULL OR erro NOT LIKE 'lock:%') ORDER BY id LIMIT " . (int)$limite, ["lock:$token"]);
+    qx("UPDATE fila_emails SET erro = ?, reservado_em = NOW() WHERE status = 'pendente' AND tentativas < 5 AND (erro IS NULL OR erro NOT LIKE 'lock:%') ORDER BY id LIMIT " . (int)$limite, ["lock:$token"]);
     foreach (q('SELECT * FROM fila_emails WHERE erro = ?', ["lock:$token"]) as $m) {
         try {
             email_enviar($m['para'], $m['assunto'], $m['corpo_html']);
@@ -48,16 +61,27 @@ function email_processar_fila(int $limite = 50): array
         }
     }
     // libera reservas antigas (processo que morreu no meio)
-    qx("UPDATE fila_emails SET erro = NULL WHERE status = 'pendente' AND erro LIKE 'lock:%' AND criado_em < NOW() - INTERVAL 1 HOUR");
+    qx("UPDATE fila_emails SET erro = NULL, reservado_em = NULL WHERE status = 'pendente' AND erro LIKE 'lock:%' AND reservado_em < NOW() - INTERVAL 15 MINUTE");
     return [$ok, $err];
+}
+
+/** Versão texto do e-mail (clientes sem HTML): uma informação por linha e links por extenso. */
+function email_texto(string $html): string
+{
+    $t = preg_replace('/<a [^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/is', '$2: $1', $html);
+    $t = preg_replace('/<\/td>\s*<td[^>]*>/i', ': ', $t);                       // "Rótulo: valor"
+    $t = preg_replace(['/<br\s*\/?>/i', '/<\/(p|div|tr|h\d|li|table)>/i', '/<li[^>]*>/i'], ["\n", "\n", '- '], $t);
+    $t = html_entity_decode(strip_tags($t), ENT_QUOTES, 'UTF-8');
+    $t = preg_replace(["/[ \t]+\n/", "/\n{3,}/"], ["\n", "\n\n"], $t);
+    return trim($t);
 }
 
 function email_enviar(string $para, string $assunto, string $html): void
 {
     $de = (string)cfg('email.remetente');
     $nome = (string)cfg('email.remetente_nome', cfg('app_nome'));
-    $assuntoEnc = '=?UTF-8?B?' . base64_encode($assunto) . '?=';
-    $texto = trim(html_entity_decode(strip_tags(preg_replace(['/<br\s*\/?>/i', '/<\/(p|div|tr|h\d)>/i'], "\n", $html)), ENT_QUOTES, 'UTF-8'));
+    $assuntoEnc = mb_encode_mimeheader($assunto, 'UTF-8', 'B', "\r\n");   // RFC 2047, linhas de até 75 caracteres
+    $texto = email_texto($html);
     $fronteira = 'b' . bin2hex(random_bytes(8));
     $corpo = "--$fronteira\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n" . chunk_split(base64_encode($texto))
            . "--$fronteira\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n" . chunk_split(base64_encode($html))
@@ -87,7 +111,11 @@ function email_enviar(string $para, string $assunto, string $html): void
 function smtp_enviar(string $de, string $para, string $mensagem): void
 {
     $host = (string)cfg('email.smtp_host'); $porta = (int)cfg('email.smtp_porta', 587);
-    $seg = (string)cfg('email.smtp_seguranca', 'tls');
+    $seg = strtolower(trim((string)cfg('email.smtp_seguranca', 'tls')));
+    if ($seg === 'starttls') $seg = 'tls';
+    $local = in_array($host, ['localhost', '127.0.0.1', '::1'], true);
+    if ((string)cfg('email.smtp_usuario') !== '' && !in_array($seg, ['tls', 'ssl'], true) && !$local)
+        throw new RuntimeException("SMTP: autenticação sem criptografia recusada (smtp_seguranca='$seg'). Use 'tls' ou 'ssl'.");
     $ctx = stream_context_create(['ssl' => ['verify_peer' => true, 'verify_peer_name' => true, 'SNI_enabled' => true, 'peer_name' => $host]]);
     $s = @stream_socket_client(($seg === 'ssl' ? 'ssl://' : 'tcp://') . "$host:$porta", $errno, $errstr, 15, STREAM_CLIENT_CONNECT, $ctx);
     if (!$s) throw new RuntimeException("SMTP: conexão falhou ($errstr)");
@@ -110,6 +138,8 @@ function smtp_enviar(string $de, string $para, string $mensagem): void
         $cmd($ehlo, [250]);
         if ($seg === 'tls') {
             $cmd('STARTTLS', [220]);
+            // nada pode vir antes do handshake TLS (proteção contra injeção de respostas, CVE-2011-0411)
+            if ((stream_get_meta_data($s)['unread_bytes'] ?? 0) > 0) throw new RuntimeException('SMTP: dados inesperados após STARTTLS');
             if (!stream_socket_enable_crypto($s, true, STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT | STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT)) throw new RuntimeException('SMTP: falha no STARTTLS');
             $cmd($ehlo, [250]);
         }
@@ -240,11 +270,13 @@ function enviar_resumo_diario(array $geradas = []): int
     $pedidos = (int)qv("SELECT COUNT(*) FROM pedidos WHERE status = 'aberto'");
     $estoque = q('SELECT codigo, descricao, estoque_atual, estoque_minimo, unidade FROM artigos WHERE ativo = 1 AND estoque_atual < estoque_minimo ORDER BY codigo LIMIT 30');
     $parados = q("SELECT codigo, nome FROM ativos WHERE status IN ('parado','em_manutencao') ORDER BY criticidade, codigo");
-    if (!$geradas && !$atrasadas && !$pedidos && !$estoque && !$parados) return 0;
+    $geradasHoje = q("SELECT o.numero, o.titulo, a.codigo FROM ordens_trabalho o LEFT JOIN ativos a ON a.id = o.ativo_id
+                      WHERE o.plano_id IS NOT NULL AND o.data_abertura >= CURDATE() ORDER BY o.id");
+    if (!$geradasHoje && !$atrasadas && !$pedidos && !$estoque && !$parados) return 0;
 
     $li = fn(array $itens) => $itens ? '<ul style="padding-left:18px;margin:4px 0 16px">' . implode('', array_map(fn($x) => "<li>$x</li>", $itens)) . '</ul>' : '<p style="color:#6c757d;margin:4px 0 16px">Nenhum.</p>';
-    $html = '<h3 style="font-size:15px;margin:0">Preventivas geradas hoje (' . count($geradas) . ')</h3>'
-        . $li(array_map(fn($g) => e($g['plano']['titulo']), $geradas))
+    $html = '<h3 style="font-size:15px;margin:0">Preventivas geradas hoje (' . count($geradasHoje) . ')</h3>'
+        . $li(array_map(fn($g) => e("{$g['numero']} · {$g['codigo']} — {$g['titulo']}"), $geradasHoje))
         . '<h3 style="font-size:15px;margin:0">OTs atrasadas (' . count($atrasadas) . ')</h3>'
         . $li(array_map(fn($o) => e("{$o['numero']} · {$o['codigo']} — {$o['titulo']}") . ' <span style="color:#dc3545">(' . dt($o['data_prevista']) . ')</span>' . ($o['resp'] ? ' · ' . e($o['resp']) : ''), $atrasadas))
         . '<h3 style="font-size:15px;margin:0">Equipamentos parados / em manutenção (' . count($parados) . ')</h3>'

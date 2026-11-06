@@ -47,10 +47,10 @@ function gerar_ot_de_plano(array $p, ?string $dataPrevista = null, ?int $usuario
 {
     $pdo = db();
     $propria = !$pdo->inTransaction();
-    if ($propria) $pdo->beginTransaction();
+    if ($propria) $pdo->beginTransaction(); else $pdo->exec('SAVEPOINT gerar_ot'); // falha parcial não vaza para a transação de fora
     try {
         $p = q1('SELECT * FROM planos_manutencao WHERE id = ? FOR UPDATE', [$p['id']]) ?? $p;
-        if (plano_tem_ot_pendente((int)$p['id'])) { if ($propria) $pdo->commit(); return null; }
+        if (plano_tem_ot_pendente((int)$p['id'])) { if ($propria) $pdo->commit(); else $pdo->exec('RELEASE SAVEPOINT gerar_ot'); return null; }
         $otId = insert('ordens_trabalho', [
             'numero'         => proximo_numero('ordens_trabalho', 'OT'),
             'ativo_id'       => $p['ativo_id'],
@@ -68,9 +68,10 @@ function gerar_ot_de_plano(array $p, ?string $dataPrevista = null, ?int $usuario
         qx('INSERT INTO ot_tarefas (ot_id, ordem, descricao) SELECT ?, ordem, descricao FROM plano_tarefas WHERE plano_id = ? ORDER BY ordem, id', [$otId, $p['id']]);
         qx('INSERT INTO ot_materiais (ot_id, artigo_id, quantidade, custo_unitario, baixado)
             SELECT ?, pm.artigo_id, pm.quantidade, a.custo_medio, 0 FROM plano_materiais pm JOIN artigos a ON a.id = pm.artigo_id WHERE pm.plano_id = ?', [$otId, $p['id']]);
-        if ($propria) $pdo->commit();
+        if ($propria) $pdo->commit(); else $pdo->exec('RELEASE SAVEPOINT gerar_ot');
     } catch (Throwable $ex) {
-        if ($propria && $pdo->inTransaction()) $pdo->rollBack();
+        if ($propria) { if ($pdo->inTransaction()) $pdo->rollBack(); }
+        elseif ($pdo->inTransaction()) $pdo->exec('ROLLBACK TO SAVEPOINT gerar_ot');
         throw $ex;
     }
     auditar('gerar_ot', 'planos_manutencao', (int)$p['id'], "OT #$otId gerada automaticamente");

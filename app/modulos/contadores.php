@@ -36,9 +36,12 @@ if ($acao === 'leitura' && is_post()) {
     if (!$reset && !$retroativa && $valor < (float)$c['valor_atual'])
         $volta('O valor informado é menor que o atual (' . num($c['valor_atual'], 1) . '). Marque "troca/zeragem do contador" se for o caso.');
     if ($retroativa) {
-        // leitura antiga entra só no histórico e precisa ser coerente com as leituras vizinhas
-        $antes = qv('SELECT MAX(valor) FROM leituras_contador WHERE contador_id = ? AND data_leitura <= ?', [$c['id'], $data]);
-        $depois = qv('SELECT MIN(valor) FROM leituras_contador WHERE contador_id = ? AND data_leitura >= ?', [$c['id'], $data]);
+        // leitura antiga entra só no histórico e precisa ser coerente com as leituras vizinhas da MESMA escala
+        // (entre a última troca/zeragem antes da data e a próxima depois dela)
+        $zAntes = qv('SELECT MAX(data_leitura) FROM leituras_contador WHERE contador_id = ? AND zeragem = 1 AND data_leitura <= ?', [$c['id'], $data]) ?? '1000-01-01';
+        $zDepois = qv('SELECT MIN(data_leitura) FROM leituras_contador WHERE contador_id = ? AND zeragem = 1 AND data_leitura > ?', [$c['id'], $data]) ?? '9999-12-31';
+        $antes = qv('SELECT MAX(valor) FROM leituras_contador WHERE contador_id = ? AND data_leitura <= ? AND data_leitura >= ?', [$c['id'], $data, $zAntes]);
+        $depois = qv('SELECT MIN(valor) FROM leituras_contador WHERE contador_id = ? AND data_leitura >= ? AND data_leitura < ?', [$c['id'], $data, $zDepois]);
         if (($antes !== null && $valor < (float)$antes) || ($depois !== null && $valor > (float)$depois))
             $volta('Leitura retroativa incoerente com o histórico (deve ficar entre ' . num((float)$antes, 1) . ' e ' . num((float)$depois, 1) . ').');
     }
@@ -46,7 +49,9 @@ if ($acao === 'leitura' && is_post()) {
     db()->beginTransaction();
     try {
         $c = q1('SELECT * FROM contadores WHERE id = ? FOR UPDATE', [$c['id']]);
-        insert('leituras_contador', ['contador_id' => $c['id'], 'valor' => $valor, 'data_leitura' => $data, 'usuario_id' => usuario()['id'],
+        // revalida sob lock: outra leitura pode ter entrado entre a validação e agora
+        if (!$reset && !$retroativa && $valor < (float)$c['valor_atual']) throw new RuntimeException('Outra leitura maior foi registrada agora há pouco (' . num($c['valor_atual'], 1) . ').');
+        insert('leituras_contador', ['contador_id' => $c['id'], 'valor' => $valor, 'zeragem' => $reset ? 1 : 0, 'data_leitura' => $data, 'usuario_id' => usuario()['id'],
             'observacao' => $reset ? 'Troca/zeragem do contador (antes: ' . num($c['valor_atual'], 1) . ')' : (mb_substr((string)post('observacao'), 0, 255) ?: null)]);
         if (!$retroativa) qx('UPDATE contadores SET valor_atual = ?, atualizado_em = ? WHERE id = ?', [$valor, $data, $c['id']]);
         if ($reset) {
@@ -64,9 +69,10 @@ if ($acao === 'leitura' && is_post()) {
             }
         }
         db()->commit();
-    } catch (Throwable $ex) {
+    } catch (RuntimeException $ex) {
         if (db()->inTransaction()) db()->rollBack();
-        throw $ex;
+        if ($ex instanceof PDOException) throw $ex;
+        $volta($ex->getMessage());
     }
     $g = $retroativa ? [] : gerar_preventivas(usuario()['id'], (int)$c['id']);
     flash(($retroativa ? 'Leitura retroativa registrada no histórico.' : 'Leitura registrada.') . ($g ? ' ' . plural(count($g), 'OT preventiva gerada', 'OTs preventivas geradas') . ' pelo contador.' : ''));
@@ -88,7 +94,7 @@ if ($acao === 'excluir' && is_post()) {
 $lista = q('SELECT c.*, a.codigo, a.nome AS ativo FROM contadores c JOIN ativos a ON a.id=c.ativo_id ' . ($ativoId ? 'WHERE c.ativo_id = ' . $ativoId : '') . ' ORDER BY a.codigo, c.nome');
 view_header('Contadores', 'contadores'); ?>
 <div class="page-title"><h1>Contadores e leituras</h1></div>
-<form method="get" class="mb-3" style="max-width:480px"><input type="hidden" name="r" value="contadores"><?= sel('ativo', arvore_opcoes('ativos'), $ativoId ?: null, true, 'onchange="this.form.submit()"') ?></form>
+<form method="get" class="mb-3" style="max-width:480px"><input type="hidden" name="r" value="contadores"><?= sel('ativo', arvore_opcoes('ativos'), $ativoId ?: null, true, 'data-auto-submit') ?></form>
 
 <?php if ($ativoId && pode('gerir')): ?>
 <div class="card mb-3"><div class="card-body">
