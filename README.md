@@ -19,6 +19,7 @@ PHP 8.1+ puro (sem framework), PDO/MySQL, Bootstrap 5, Chart.js e FullCalendar v
 | **QR Code e etiquetas** | Cada ativo tem um QR Code com link curto (`/q.php?c=CODIGO`). A página **Ativos › Etiquetas QR** imprime etiquetas em 3 tamanhos, filtradas por localização, categoria ou criticidade. |
 | **Interface mobile (PWA)** | Pode ser instalada no celular; tem leitor de QR pela câmera e busca por código. Pela ficha resumida do ativo dá para reportar falha, abrir OT e registrar leitura de contador. A execução da OT tem botões grandes: iniciar/pausar, checklist, apontar +0,5/+1/+2/+4 h, requisitar peça e concluir. O solicitante acompanha os próprios pedidos. Se o QR for lido sem sessão, o sistema pede login e volta para o equipamento. No celular, técnicos e solicitantes entram direto nessa interface. |
 | **Notificações por e-mail** | Avisam: novo pedido (para os gestores), pedido aprovado ou rejeitado (para o solicitante), OT atribuída (para o técnico), serviço concluído (para o solicitante) e o resumo diário (atrasadas, preventivas geradas, ativos parados, estoque baixo). Os envios passam por uma fila, com SMTP próprio (STARTTLS/SSL) ou `mail()`. Cada usuário pode desligar os e-mails em *Minha conta*. |
+| **Listagens** | Todas as listas (OTs, ativos, pedidos, estoque, planos, usuários, cadastros) são tabelas *server-side* no estilo DataTables: busca por vários termos em várias colunas, ordenação clicando no cabeçalho, paginação, itens por página (lembrados por usuário) e exportação CSV do resultado filtrado. A tabela é atualizada sem recarregar a página e a URL acompanha, então voltar e compartilhar o link funcionam; sem JavaScript, tudo funciona com recarga. |
 | **Cadastros** | Localizações (em árvore), categorias, fornecedores, técnicos (internos ou terceirizados, com custo/hora), especialidades e usuários. |
 
 ### Perfis de acesso
@@ -30,40 +31,83 @@ PHP 8.1+ puro (sem framework), PDO/MySQL, Bootstrap 5, Chart.js e FullCalendar v
 | `tecnico` | Executa as OTs atribuídas a ele ou sem responsável (status, checklist, as próprias horas, materiais), registra leituras de contador, consulta ativos e estoque |
 | `solicitante` | Abre e acompanha os próprios pedidos |
 
+## Requisitos
+
+- PHP 8.1+ com as extensões `pdo_mysql`, `mbstring`, `fileinfo`, `openssl` (SMTP com TLS e Turnstile), `session` e `json`.
+- MySQL 8.0+ ou MariaDB 10.5+. Compatível com `ONLY_FULL_GROUP_BY` e `STRICT_*`.
+- No php.ini: `upload_max_filesize` e `post_max_size` maiores que `upload_max_mb` (ex.: 16M e 20M).
+
 ## Instalação
 
 ```bash
-# 1. Banco
-mysql -u root -p -e "CREATE DATABASE cmms CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-  CREATE USER 'cmms'@'localhost' IDENTIFIED BY 'SENHA'; GRANT ALL ON cmms.* TO 'cmms'@'localhost';"
+# 1. Banco (no MariaDB do Ubuntu/Debian use "sudo mysql" no lugar de "mysql -u root -p")
+mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS cmms CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+  CREATE USER IF NOT EXISTS 'cmms'@'localhost' IDENTIFIED BY 'SENHA'; GRANT ALL ON cmms.* TO 'cmms'@'localhost';"
 
-# 2. Configuração
-cp config/config.sample.php config/config.php   # edite db, empresa, base_url, cron_token
+# 2. Configuração: edite db, empresa, base_url, app_url, cron_token (mín. 24 caracteres), proxy, e-mail e turnstile
+cp config/config.sample.php config/config.php
+php -r "echo bin2hex(random_bytes(32)), PHP_EOL;"     # gera o cron_token
 
-# 3. Estrutura + administrador (--demo popula uma fábrica fictícia com 6 meses de histórico)
-php install.php --email=admin@empresa.com.br --senha=SenhaForte123 --demo
+# 3. Estrutura + administrador (a senha é pedida no terminal)
+#    install.php APAGA as tabelas do banco configurado; num banco com dados ele exige digitar o nome do banco.
+php install.php --email=admin@empresa.com.br
+#    Somente demonstração/homologação (cria usuários *@demo.local com a MESMA senha do admin):
+#    php install.php --email=admin@empresa.com.br --demo
+
+# 4. Permissões (troque www-data pelo usuário do PHP-FPM/Apache)
+sudo chown -R root:www-data /var/www/mzmanut
+sudo chmod 640 /var/www/mzmanut/config/config.php
+sudo mkdir -p /var/www/mzmanut/storage/uploads
+sudo chown -R www-data:www-data /var/www/mzmanut/storage && sudo chmod -R 770 /var/www/mzmanut/storage
 ```
 
-O **DocumentRoot** do Apache/Nginx deve apontar para `public/`. As pastas `app/`, `config/`, `storage/` e `database/` ficam fora da raiz pública. Em hospedagem compartilhada sem acesso ao DocumentRoot, use o `.htaccess` da raiz, que redireciona para `public/`. A pasta `storage/` também tem um `.htaccess` que bloqueia o acesso.
+O **DocumentRoot** deve ser a pasta `public/` (veja exemplos de Nginx e Apache em *Produção*). O `.htaccess` da raiz é só um paliativo para hospedagem compartilhada.
 
 Para testar localmente: `php -S localhost:8080 -t public`
 
-### Atualizações (migrações)
+### Atualização (ex.: v2 → v3)
 
-Em uma instalação existente, depois de atualizar os arquivos rode `php migrate.php` (`--status` lista o que já foi aplicado).
+1. Faça backup: `mysqldump --single-transaction cmms > cmms_$(date +%F).sql`, mais `config/config.php` e `storage/uploads/`.
+2. Ative o modo manutenção: `touch storage/MANUTENCAO`. Usuários veem "Sistema em atualização" enquanto o arquivo existir.
+3. Extraia o pacote por cima da instalação. O zip não traz `config/config.php`, então ele é preservado.
+4. Rode `php migrate.php`. Pode ser repetido com segurança; `--status` lista o que já foi aplicado. Se uma pré-checagem falhar, o próprio comando diz o que corrigir.
+5. Copie para o seu `config/config.php` as chaves novas do `config.sample.php`: `app_url`, `forcar_https`, `email`, `proxy`, `rate_limit` e `turnstile`.
+   - `app_url` é obrigatório para os links dos e-mails e para as etiquetas QR.
+   - `cron_token` precisa ter 24 caracteres ou mais (tokens menores recebem 403 e geram aviso no log).
+6. Recarregue o PHP-FPM/Apache para limpar o opcache (`sudo systemctl reload php8.3-fpm`) e apague `storage/MANUTENCAO`.
+7. Os usuários precisarão entrar de novo.
 
 ### Tarefas agendadas (cron)
 
+Rode o cron com o mesmo usuário do PHP web (`sudo crontab -u www-data -e`):
+
 ```cron
 # gera as preventivas devidas e envia o resumo diário aos gestores
-15 5 * * * /usr/bin/php /caminho/mzmanut/cron/gerar_preventivas.php >> /caminho/mzmanut/storage/cron.log 2>&1
+15 5 * * * /usr/bin/php /var/www/mzmanut/cron/gerar_preventivas.php >> /var/www/mzmanut/storage/cron.log 2>&1
 # envia a fila de e-mails
-*/5 * * * * /usr/bin/php /caminho/mzmanut/cron/enviar_emails.php >> /caminho/mzmanut/storage/cron.log 2>&1
+*/5 * * * * /usr/bin/php /var/www/mzmanut/cron/enviar_emails.php >> /var/www/mzmanut/storage/cron.log 2>&1
 ```
 
-Para o e-mail funcionar, preencha o bloco `email` do `config.php` e defina `app_url` (o domínio público), que é usado nos links e nos QR Codes. A câmera do leitor de QR só funciona em **HTTPS**.
+Se não houver cron por CLI, use a URL e mande o token no cabeçalho (assim ele não vai para o log de acesso):
+`curl -fsS -H "X-Cron-Token: SEU_TOKEN" https://seu-dominio/index.php?r=cron`. O botão **Gerar OTs vencidas**, na tela de planos, faz o mesmo sob demanda.
 
-Se não houver cron por CLI, use `https://seu-dominio/index.php?r=cron&token=SEU_CRON_TOKEN`. O botão **Gerar OTs vencidas**, na tela de planos, faz a mesma coisa sob demanda.
+Para o e-mail funcionar, preencha o bloco `email` e o `app_url`; sem `app_url` o envio fica desligado (os links sairiam do cabeçalho da requisição). A câmera do leitor de QR só funciona em **HTTPS**.
+
+### Rate limit, Cloudflare e Turnstile
+
+- **Rate limit** (bloco `rate_limit`): limites por minuto ou por hora.
+  - Por IP: qualquer página, tentativas de login, aberturas do link do QR e cron por URL.
+  - Por usuário: envios de formulário, pedidos de trabalho e anexos.
+  - Ao estourar um limite, o sistema responde HTTP 429 com `Retry-After`. Os contadores ficam na tabela `rate_limites`.
+- **Atrás da Cloudflare ou de um proxy reverso**, defina `'proxy' => 'cloudflare'` (ou `'confiavel'` com `proxies_confiaveis`).
+  - Assim o sistema usa o IP real do visitante no rate limit, no bloqueio de login e na auditoria.
+  - O cabeçalho `CF-Connecting-IP` só é aceito quando a conexão vem das faixas oficiais da Cloudflare, então ninguém consegue forjá-lo.
+- **Cloudflare Turnstile** (bloco `turnstile`): crie as chaves no painel da Cloudflare (Turnstile → Add site).
+  - Formulários: `login` e, opcionalmente, `pedido`.
+  - No login, o widget pode aparecer sempre ou só depois de 3 falhas (`modo_login`).
+  - A validação é feita no servidor, conferindo também a ação do formulário.
+  - Se a Cloudflare não responder, o padrão é bloquear (`falhar_aberto => false`).
+  - Para testar, use as chaves da Cloudflare `1x00000000000000000000AA` / `1x0000000000000000000000000000000AA`.
 
 ## Segurança
 
@@ -74,7 +118,20 @@ Se não houver cron por CLI, use `https://seu-dominio/index.php?r=cron&token=SEU
   - a sessão expira após 4 h sem uso, ou 16 h no máximo.
 - Cookies `HttpOnly`/`SameSite=Lax`, `Secure` em HTTPS (`forcar_https` atrás de proxy) e `session.use_strict_mode`. O token CSRF é renovado no login.
 - Token CSRF em todo POST; o logout também é por POST.
-- PDO com *prepared statements*; CSP, `X-Frame-Options`, `nosniff` e HSTS em HTTPS.
+- **XSS:**
+  - toda saída HTML é escapada;
+  - a CSP usa **nonce por requisição + `strict-dynamic`**, sem `unsafe-inline` para scripts e com `script-src-attr 'none'`. Nenhum script inline e nenhum `onclick`: todo o JavaScript fica em `app.js`, ligado por atributos `data-*`. Mesmo um HTML injetado não executaria;
+  - dados para gráficos e calendário vão em atributos escapados, não em `<script>`;
+  - o JSON é emitido com `JSON_HEX_*`;
+  - as bibliotecas da CDN levam **SRI** (hash de integridade).
+- PDO com *prepared statements*; `X-Frame-Options`, `nosniff`, `Cross-Origin-Opener-Policy`, `Permissions-Policy` e HSTS em HTTPS.
+- **Rate limit e Turnstile:** ver a seção acima. Força bruta no login é bloqueada em três níveis:
+  - 8 falhas no mesmo e-mail e IP;
+  - 50 falhas no mesmo IP;
+  - 40 falhas no mesmo e-mail, de vários IPs.
+
+  Assim um atacante não consegue travar a conta de outra pessoa nem derrubar uma empresa inteira atrás de NAT.
+- **SMTP:** recusa autenticação sem TLS/SSL e detecta injeção de respostas no STARTTLS.
 - Erros técnicos só aparecem para administradores, e somente com `debug` ligado.
 - Controle por perfil em cada ação. O técnico executa apenas as OTs atribuídas a ele (ou sem responsável) e aponta só as próprias horas.
 - Concorrência:
@@ -114,18 +171,23 @@ Desempenho, medido com 200 mil OTs:
 ```
 app/
   bootstrap.php   config, PDO, includes
-  helpers.php     HTML, banco, formatação, CSV, árvores
+  helpers.php     HTML, banco, formatação, CSV, árvores, numeração, regras de OT
   auth.php        sessão, login, matriz de permissões
+  seguranca.php   IP real (proxy/Cloudflare), rate limit, Turnstile, CSP/nonce/SRI
+  tabela.php      tabelas server-side (busca, ordenação, paginação, CSV, AJAX)
   preventiva.php  motor de preventivas (geração, reprogramação, projeção)
   estoque.php     movimentação com custo médio
   kpi.php         cálculo de indicadores
-  modulos/        um arquivo por módulo (front controller ?r=modulo/acao)
-  views/          header/footer
+  email.php       fila, SMTP e notificações
+  migracoes.php   aplicação das migrações
+  modulos/        um arquivo por módulo (front controller ?r=modulo/acao; m = interface mobile)
+  views/          layouts desktop e mobile
 config/           config.sample.php
-cron/             gerar_preventivas.php
-database/         schema.sql, demo.php
-public/           index.php, assets/
+cron/             gerar_preventivas.php, enviar_emails.php
+database/         schema.sql, migracoes/*.sql, demo.php
+public/           index.php, q.php (link do QR), manifest.php, sw.js, assets/
 storage/uploads/  anexos (fora da raiz pública)
+install.php, migrate.php
 ```
 
 ## Definições dos KPIs
@@ -138,7 +200,38 @@ storage/uploads/  anexos (fora da raiz pública)
 
 ## Produção — recomendações
 
-- DocumentRoot apontando para `public/` (as demais pastas ficam fora do acesso web). No Nginx, não há `.htaccess`, então isso é obrigatório.
+- DocumentRoot apontando para `public/`, para que as demais pastas fiquem fora do acesso web. Com Nginx, ou com Apache e `AllowOverride None`, os `.htaccess` não valem; se a raiz for o DocumentRoot, ficam expostos os anexos, os logs, os `.sql` e o `.git/`.
+
+**Nginx**:
+```nginx
+server {
+    server_name manutencao.empresa.com.br;
+    root /var/www/mzmanut/public;
+    index index.php;
+    client_max_body_size 20m;
+    location ~ /\. { deny all; }
+    location / { try_files $uri $uri/ /index.php?$query_string; }
+    location ~ \.php$ {
+        try_files $uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+    }
+}
+```
+**Apache 2.4**:
+```apache
+<VirtualHost *:443>
+    ServerName manutencao.empresa.com.br
+    DocumentRoot /var/www/mzmanut/public
+    UseCanonicalName On
+    <Directory /var/www/mzmanut/public>
+        Options -Indexes
+        AllowOverride None
+        Require all granted
+    </Directory>
+</VirtualHost>
+```
 - HTTPS (exigido pela câmera do leitor de QR) e `debug => false`.
 - MySQL 8+ ou MariaDB 10.5+; `innodb_buffer_pool_size` de 1 a 2 GB para bases grandes.
-- O bloqueio de login por IP considera `REMOTE_ADDR`. Atrás de proxy reverso, configure o servidor web para repassar o IP real do cliente; senão todos os acessos parecem vir do mesmo IP.
+- Atrás de Cloudflare ou de proxy reverso, configure `proxy` no `config.php`. Sem isso, todos os acessos parecem vir do IP do proxy.

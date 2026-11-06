@@ -16,7 +16,7 @@ function url_abs(string $rota = '', array $params = []): string
 {
     $base = rtrim((string)cfg('app_url', ''), '/');
     if ($base === '') {
-        $https = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+        $https = https_ativo();
         // SERVER_NAME vem da configuração do servidor web (não do cabeçalho Host, que o cliente controla)
         $host = preg_replace('/[^a-z0-9.\-:\[\]]/i', '', (string)($_SERVER['SERVER_NAME'] ?? 'localhost'));
         $porta = (int)($_SERVER['SERVER_PORT'] ?? 80);
@@ -66,12 +66,24 @@ function flash(?string $msg = null, string $tipo = 'success')
 function old_all(): array
 {
     if (!array_key_exists('__old', $GLOBALS)) { $GLOBALS['__old'] = $_SESSION['old'] ?? []; unset($_SESSION['old']); }
-    // números digitados no formato brasileiro voltam como número (para o num() do formulário)
-    return array_map(fn($v) => (is_string($v) && str_contains($v, ',') && ($d = dec_br($v)) !== null) ? $d : $v, $GLOBALS['__old']);
+    return $GLOBALS['__old'];   // valores crus, exatamente como digitados
 }
 function old(string $k, $padrao = null) { $o = old_all(); return array_key_exists($k, $o) ? $o[$k] : $padrao; }
-/** Mescla os dados reenviados sobre o registro carregado do banco. */
-function com_old(?array $registro): array { return array_merge($registro ?? [], old_all()); }
+/** Valor numérico reenviado (formato brasileiro interpretado) ou o padrão. */
+function old_num(string $k, $padrao = null) { $v = old($k); return ($v === null || $v === '') ? $padrao : (dec_br($v) ?? $padrao); }
+/**
+ * Mescla os dados reenviados sobre o registro do banco.
+ *  $numericos: campos digitados no formato brasileiro (convertidos para número, para o num() do formulário)
+ *  $checks: checkboxes (desmarcado não é enviado pelo navegador → vira 0)
+ */
+function com_old(?array $registro, array $numericos = [], array $checks = []): array
+{
+    $o = old_all();
+    if (!$o) return $registro ?? [];
+    foreach ($checks as $c) $o[$c] = !empty($o[$c]) ? 1 : 0;
+    foreach ($numericos as $n) if (isset($o[$n]) && is_string($o[$n])) $o[$n] = dec_br($o[$n]);
+    return array_merge($registro ?? [], $o);
+}
 
 /* ---------- Entrada ---------- */
 function get(string $k, $padrao = null) { return isset($_GET[$k]) && $_GET[$k] !== '' ? $_GET[$k] : $padrao; }
@@ -173,7 +185,13 @@ function proximo_numero(string $tabela, string $prefixo): string
            [$prefixo, $ano, "$prefixo$ano-%"]);
         $up();
     }
-    return sprintf('%s%d-%05d', $prefixo, $ano, (int)qv('SELECT LAST_INSERT_ID()'));
+    $num = sprintf('%s%d-%05d', $prefixo, $ano, (int)qv('SELECT LAST_INSERT_ID()'));
+    // autocorreção: se o número já existe (dados importados, versão antiga em execução), avança
+    for ($i = 0; $i < 1000 && qv("SELECT 1 FROM `$tabela` WHERE numero = ?", [$num]); $i++) {
+        $up();
+        $num = sprintf('%s%d-%05d', $prefixo, $ano, (int)qv('SELECT LAST_INSERT_ID()'));
+    }
+    return $num;
 }
 
 /** Recalcula os custos desnormalizados da OT (mão de obra e materiais baixados). Chamar após qualquer alteração. */
@@ -190,7 +208,7 @@ function auditar(string $acao, string $entidade, ?int $id = null, string $detalh
     try {
         insert('auditoria', [
             'usuario_id' => usuario()['id'] ?? null, 'acao' => $acao, 'entidade' => $entidade,
-            'entidade_id' => $id, 'detalhe' => mb_substr($detalhe, 0, 500), 'ip' => $_SERVER['REMOTE_ADDR'] ?? 'cli',
+            'entidade_id' => $id, 'detalhe' => mb_substr($detalhe, 0, 500), 'ip' => PHP_SAPI === 'cli' ? 'cli' : ip_cliente(),
         ]);
     } catch (Throwable) { /* auditoria nunca deve quebrar o fluxo */ }
 }
@@ -205,8 +223,18 @@ function dt($v, bool $hora = false): string
     return $t ? date($hora ? 'd/m/Y H:i' : 'd/m/Y', $t) : '';
 }
 function moeda($v): string { return 'R$ ' . number_format((float)$v, 2, ',', '.'); }
+/** Preço unitário: mostra até 4 casas quando os centavos não bastam (ex.: custo médio 41,375). */
+function moeda_unit($v): string
+{
+    $v = (float)$v;
+    $casas = abs(round($v, 2) - $v) < 1e-9 ? 2 : (abs(round($v, 3) - $v) < 1e-9 ? 3 : 4);
+    return 'R$ ' . number_format($v, $casas, ',', '.');
+}
 function num($v, int $casas = 2): string { return number_format((float)$v, $casas, ',', '.'); }
 function input_dt($v): string { return $v ? str_replace(' ', 'T', substr((string)$v, 0, 16)) : ''; }
+
+/** Cores por tipo de OT (calendário, gráficos, legendas). */
+const CORES_TIPO = ['corretiva' => '#dc3545', 'preventiva' => '#198754', 'preditiva' => '#0dcaf0', 'inspecao' => '#0d6efd', 'lubrificacao' => '#ffc107', 'calibracao' => '#6c757d', 'melhoria' => '#212529'];
 
 const ROTULOS = [
     'ot_status' => [
@@ -249,27 +277,6 @@ function sel(string $nome, array $opcoes, $atual = null, bool $vazio = true, str
     return $h . '</select>';
 }
 
-function paginar(string $sqlBase, array $params, int $porPagina = 25): array
-{
-    $pag = max(1, (int)get('pag', 1));
-    $total = (int)qv("SELECT COUNT(*) FROM ($sqlBase) t", $params);
-    $linhas = q($sqlBase . ' LIMIT ' . $porPagina . ' OFFSET ' . (($pag - 1) * $porPagina), $params);
-    return ['linhas' => $linhas, 'total' => $total, 'pag' => $pag, 'paginas' => max(1, (int)ceil($total / $porPagina))];
-}
-
-function paginacao_html(array $p): string
-{
-    if ($p['paginas'] <= 1) return '<div class="small text-muted">' . $p['total'] . ' registro(s)</div>';
-    $qs = $_GET;
-    $h = '<div class="d-flex justify-content-between align-items-center"><div class="small text-muted">' . $p['total'] . ' registro(s)</div><ul class="pagination pagination-sm mb-0">';
-    $ini = max(1, $p['pag'] - 3); $fim = min($p['paginas'], $p['pag'] + 3);
-    for ($i = $ini; $i <= $fim; $i++) {
-        $qs['pag'] = $i;
-        $h .= '<li class="page-item' . ($i === $p['pag'] ? ' active' : '') . '"><a class="page-link" href="?' . e(http_build_query($qs)) . '">' . $i . '</a></li>';
-    }
-    return $h . '</ul></div>';
-}
-
 /** Neutraliza fórmulas (CSV injection): prefixa ' em textos iniciados por = + - @ tab ou CR. */
 function csv_seguro($v)
 {
@@ -307,6 +314,17 @@ function atualizar_status_ativo(?int $ativoId): void
     if ($novo !== $st) qx('UPDATE ativos SET status = ? WHERE id = ?', [$novo, $ativoId]);
 }
 
+/* ---------- Ordens de trabalho: quem pode executar ---------- */
+function ot_aberta(array $o): bool { return in_array($o['status'], ['aberta', 'planejada', 'em_execucao', 'aguardando_pecas'], true); }
+
+/** Gestor executa qualquer OT aberta; técnico só as atribuídas a ele ou ainda sem responsável. */
+function ot_pode_executar(array $o): bool
+{
+    if (!pode('executar') || !ot_aberta($o)) return false;
+    if (pode('gerir') || !$o['responsavel_id']) return true;
+    return (int)$o['responsavel_id'] === (int)(usuario()['tecnico_id'] ?? 0);
+}
+
 /* ---------- Árvores ---------- */
 function arvore_opcoes(string $tabela, string $rotulo = 'nome', ?int $excluir = null): array
 {
@@ -330,7 +348,7 @@ function descendentes(string $tabela, int $id): array
     if (!in_array($tabela, ['ativos', 'localizacoes'], true)) throw new InvalidArgumentException('tabela');
     // UNION (sem ALL) interrompe eventuais ciclos
     $ids = array_map('intval', array_column(q("WITH RECURSIVE d AS (SELECT id FROM `$tabela` WHERE id = ? UNION SELECT t.id FROM `$tabela` t JOIN d ON t.parent_id = d.id) SELECT id FROM d", [$id]), 'id'));
-    return $ids ?: [$id];
+    return array_values(array_unique([$id, ...$ids]));   // a raiz sempre na posição 0 (usada pelos KPIs)
 }
 
 function caminho_localizacao(?int $id): string
@@ -349,16 +367,13 @@ function caminho_localizacao(?int $id): string
 function view_header(string $titulo, string $menuAtivo = ''): void { $GLOBALS['__titulo'] = $titulo; $GLOBALS['__menu'] = $menuAtivo; require APP_ROOT . '/app/views/header.php'; }
 function view_footer(): void { require APP_ROOT . '/app/views/footer.php'; }
 
-/** Renderiza em SVG todo elemento [data-qr] (biblioteca qrcode-generator, MIT). */
-function qr_js(): string
-{
-    return '<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>'
-         . '<script>document.querySelectorAll("[data-qr]").forEach(function(el){var q=qrcode(0,"M");q.addData(el.dataset.qr);q.make();el.innerHTML=q.createSvgTag({cellSize:4,margin:2,scalable:true});});</script>';
-}
+/** Biblioteca de QR Code; o app.js renderiza todo elemento [data-qr] em SVG. */
+function qr_js(): string { return cdn_js('qrcode-generator@1.4.4/qrcode.min.js'); }
 
 function json_out($dados): never
 {
     header('Content-Type: application/json; charset=utf-8');
-    echo json_encode($dados, JSON_UNESCAPED_UNICODE);
+    header('X-Content-Type-Options: nosniff');
+    echo json_encode($dados, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
     exit;
 }

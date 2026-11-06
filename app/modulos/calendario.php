@@ -1,7 +1,7 @@
 <?php
 exigir('ver');
 
-$cores = ['corretiva' => '#dc3545', 'preventiva' => '#198754', 'preditiva' => '#0dcaf0', 'inspecao' => '#0d6efd', 'lubrificacao' => '#ffc107', 'calibracao' => '#6c757d', 'melhoria' => '#212529'];
+$cores = CORES_TIPO;
 
 /* Eventos JSON para o FullCalendar: OTs existentes + projeção dos planos por tempo */
 if ($acao === 'eventos') {
@@ -52,23 +52,15 @@ $tecs = opcoes('SELECT id, nome FROM tecnicos WHERE ativo=1 ORDER BY nome');
 view_header('Calendário', 'calendario'); ?>
 <div class="page-title"><h1>Calendário de manutenção</h1>
   <div class="d-flex gap-2 align-items-center">
-    <div style="min-width:220px"><?= sel('resp', $tecs, get('resp'), true, 'class="form-select form-select-sm" aria-label="Técnico" onchange="cal.refetchEvents()"', 'Todos os técnicos') ?></div>
-    <div class="form-check"><input class="form-check-input" type="checkbox" id="proj" checked onchange="cal.refetchEvents()"><label class="form-check-label small" for="proj">Mostrar projeção dos planos</label></div>
+    <div style="min-width:220px"><?= sel('resp', $tecs, get('resp'), true, 'class="form-select form-select-sm" aria-label="Técnico" data-cal-filtro', 'Todos os técnicos') ?></div>
+    <div class="form-check"><input class="form-check-input" type="checkbox" id="proj" name="proj" checked data-cal-filtro><label class="form-check-label small" for="proj">Mostrar projeção dos planos</label></div>
   </div>
 </div>
 <div class="small mb-2">
   <?php foreach ($cores as $t => $c): ?><span class="me-3"><i class="bi bi-square-fill" style="color:<?= $c ?>"></i> <?= e(rotulo('tipo_ot', $t)) ?></span><?php endforeach; ?>
   <span class="text-muted">◌ = previsto pelo plano (OT ainda não gerada) · ✔ = concluída · ⚠ = atrasada</span>
 </div>
-<div class="card"><div class="card-body"><div id="cal"></div></div></div>
+<div class="card"><div class="card-body"><div id="cal" data-eventos="<?= e(url('calendario/eventos')) ?>"></div></div></div>
 <?php
-$GLOBALS['__scripts'] = '<script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@fullcalendar/core@6.1.15/locales/pt-br.global.min.js"></script>
-<script>var cal;document.addEventListener("DOMContentLoaded",function(){cal=new FullCalendar.Calendar(document.getElementById("cal"),{
- locale:"pt-br",initialView:(window.innerWidth<576?"listWeek":"dayGridMonth"),height:"auto",dayMaxEvents:4,
- headerToolbar:(window.innerWidth<576?{left:"prev,next",center:"title",right:"listWeek,dayGridMonth"}:{left:"prev,next today",center:"title",right:"dayGridMonth,timeGridWeek,listMonth"}),
- events:function(info,ok,err){const u=new URL(' . json_encode(url('calendario/eventos')) . ',location.href);
-   u.searchParams.set("start",info.startStr);u.searchParams.set("end",info.endStr);
-   u.searchParams.set("resp",document.getElementById("f_resp").value);u.searchParams.set("proj",document.getElementById("proj").checked?"1":"0");
-   fetch(u).then(r=>r.json()).then(ok).catch(err);}});cal.render();});</script>';
+$GLOBALS['__scripts'] = cdn_js('fullcalendar@6.1.15/index.global.min.js') . cdn_js('@fullcalendar/core@6.1.15/locales/pt-br.global.min.js');
 view_footer();

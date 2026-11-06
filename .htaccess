@@ -1,6 +1,16 @@
-# Fallback para hospedagem onde o DocumentRoot não pode apontar para public/
-RewriteEngine On
-RewriteRule ^(app|config|database|storage|cron)(/|$) - [F,L]
-RewriteRule ^(install\.php|README\.md)$ - [F,L]
-RewriteCond %{REQUEST_URI} !^/public/
-RewriteRule ^(.*)$ public/$1 [L]
+# Paliativo para hospedagem onde o DocumentRoot NÃO pode apontar para public/.
+# Requer mod_rewrite e "AllowOverride FileInfo AuthConfig" (sem isso este arquivo é ignorado e
+# config/, storage/, database/ e .git/ ficam expostos — prefira sempre DocumentRoot = public/).
+Options -Indexes
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # já reescrito para public/: não processa de novo (evita loop, inclusive em subpasta)
+    RewriteRule ^public/ - [L]
+    # tudo o mais é servido a partir de public/ — o restante do projeto nunca fica acessível
+    RewriteRule ^(.*)$ public/$1 [END]
+</IfModule>
+<IfModule !mod_rewrite.c>
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+</IfModule>

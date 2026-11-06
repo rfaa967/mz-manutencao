@@ -35,3 +35,15 @@ body { background: #f3f5f8; }
 .assinaturas > div { flex: 1; border-top: 1px solid #000; padding-top: .25rem; font-size: .85rem; }
 .fc .ot-atrasada { border-left: 4px solid #dc3545 !important; }
 @media (max-width: 575.98px) { .fc .fc-toolbar { flex-direction: column; gap: .5rem; } .fc .fc-toolbar-title { font-size: 1.1rem; } }
+
+/* ---------- Tabelas server-side ---------- */
+.dt { position: relative; }
+.dt-busca-grupo { max-width: 360px; }
+.dt.dt-carregando .table-responsive { opacity: .45; transition: opacity .15s; pointer-events: none; }
+.dt.dt-carregando::after { content: ''; position: absolute; top: 3.2rem; left: 50%; width: 1.6rem; height: 1.6rem; margin-left: -.8rem;
+  border: .2rem solid #ffc107; border-right-color: transparent; border-radius: 50%; animation: dt-gira .7s linear infinite; }
+@keyframes dt-gira { to { transform: rotate(360deg); } }
+.dt th a.dt-ordenar:hover { text-decoration: underline !important; }
+.dt .dt-buscar-btn { display: none; }
+.no-js .dt .dt-buscar-btn { display: inline-block; }
+@media print { .dt-form, .dt .pagination { display: none !important; } }

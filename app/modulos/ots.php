@@ -3,29 +3,24 @@ exigir('ver');
 $u = usuario();
 $tecnicos = opcoes('SELECT id, nome FROM tecnicos WHERE ativo = 1 ORDER BY nome');
 
-const OT_LIMITE_HORAS = 9999;        // DECIMAL(6,2) / (8,2)
+const OT_LIMITE_HORAS = 9999;        // ot_mao_obra.horas DECIMAL(6,2)
+const OT_LIMITE_PARADA = 999999;     // ordens_trabalho.horas_parada DECIMAL(8,2)
 const OT_LIMITE_VALOR = 9999999999;  // DECIMAL(12,2)
 
 function ot_carregar(int $id, bool $lock = false): ?array
 {
+    // com $lock, trava só a linha da OT (um FOR UPDATE com JOINs travaria também ativo, técnico, plano...)
+    if ($lock && !qv('SELECT id FROM ordens_trabalho WHERE id = ? FOR UPDATE', [$id])) return null;
     return q1('SELECT o.*, a.codigo AS ativo_codigo, a.nome AS ativo_nome, a.localizacao_id, t.nome AS responsavel,
                  p.numero AS pedido_numero, p.criado_em AS pedido_em, pl.titulo AS plano_titulo, pl.gatilho AS plano_gatilho, pl.contador_id
                FROM ordens_trabalho o LEFT JOIN ativos a ON a.id=o.ativo_id LEFT JOIN tecnicos t ON t.id=o.responsavel_id
-               LEFT JOIN pedidos p ON p.id=o.pedido_id LEFT JOIN planos_manutencao pl ON pl.id=o.plano_id WHERE o.id = ?' . ($lock ? ' FOR UPDATE' : ''), [$id]);
+               LEFT JOIN pedidos p ON p.id=o.pedido_id LEFT JOIN planos_manutencao pl ON pl.id=o.plano_id WHERE o.id = ?', [$id]);
 }
-function ot_aberta(array $o): bool { return !in_array($o['status'], ['concluida', 'cancelada'], true); }
 function ot_voltar(int $id, string $ancora = ''): never { redirect_m('m/ot', ['id' => $id]); header('Location: ' . url('ots/ver', ['id' => $id]) . ($ancora ? "#$ancora" : '')); exit; }
 
-/** Gestor executa qualquer OT; técnico só as atribuídas a ele ou ainda sem responsável. */
-function ot_pode_executar(array $o): bool
-{
-    if (!pode('executar') || !ot_aberta($o)) return false;
-    if (pode('gerir') || !$o['responsavel_id']) return true;
-    return (int)$o['responsavel_id'] === (int)(usuario()['tecnico_id'] ?? 0);
-}
 function ot_exigir_execucao(?array $o): array
 {
-    if (!$o) redirect('ots');
+    if (!$o) { redirect_m('m/ots'); redirect('ots'); }
     if (!ot_aberta($o)) { flash('Esta OT já está encerrada.', 'warning'); ot_voltar((int)$o['id']); }
     if (!ot_pode_executar($o)) { flash('Esta OT está atribuída a outro técnico. Peça ao gestor para reatribuí-la.', 'danger'); ot_voltar((int)$o['id']); }
     return $o;
@@ -122,7 +117,8 @@ if ($acao === 'status' && is_post()) {
             break;
 
         case 'cancelar':
-            ot_transacao($otId, '', function () use ($otId) {
+            $pular = $o['plano_id'] && post('pular_ocorrencia', '1') === '1';
+            ot_transacao($otId, '', function () use ($otId, $pular) {
                 $o = ot_carregar($otId, true);                       // trava a OT: só um cancelamento passa
                 if (!ot_aberta($o)) throw new RuntimeException('A OT já foi encerrada por outro usuário.');
                 foreach (q('SELECT * FROM ot_materiais WHERE ot_id = ? AND baixado = 1 FOR UPDATE', [$otId]) as $m) {
@@ -132,9 +128,10 @@ if ($acao === 'status' && is_post()) {
                 recalcular_custos_ot($otId);
                 update('ordens_trabalho', ['status' => 'cancelada', 'data_fim' => null,
                     'solucao' => trim(($o['solucao'] ?? '') . "\n[Cancelada] " . mb_substr((string)post('motivo'), 0, 300))], $otId);
+                // preventiva cancelada: por padrão pula esta ocorrência (senão o gerador recria a mesma OT);
+                // na mesma transação, para o cron não recriar a OT entre o cancelamento e a reprogramação
+                if ($pular) reprogramar_plano_apos_ot($otId, true);
             });
-            // preventiva cancelada: por padrão pula esta ocorrência (senão o gerador recria a mesma OT)
-            if ($o['plano_id'] && post('pular_ocorrencia', '1') === '1') reprogramar_plano_apos_ot($otId, true);
             break;
 
         case 'reabrir':
@@ -151,7 +148,7 @@ if ($acao === 'status' && is_post()) {
             if ($fim < $ini) $erro = 'A data de término não pode ser anterior ao início.';
             elseif ($fim > date('Y-m-d H:i:s', time() + 600)) $erro = 'A data de término não pode estar no futuro.';
             elseif (dec_invalido('horas_parada') || dec_invalido('custo_externo') || dec_invalido('leitura_contador')) $erro = 'Horas de parada, custo e leitura devem ser números positivos.';
-            elseif ((post_dec('horas_parada') ?? 0) > OT_LIMITE_HORAS * 100 || (post_dec('custo_externo') ?? 0) > OT_LIMITE_VALOR) $erro = 'Valor acima do limite permitido.';
+            elseif ((post_dec('horas_parada') ?? 0) > OT_LIMITE_PARADA || (post_dec('custo_externo') ?? 0) > OT_LIMITE_VALOR) $erro = 'Valor acima do limite permitido.';
             if ($erro) { flash($erro, 'danger'); ot_voltar($otId, 'concluir'); }
 
             $pendTarefas = (int)qv('SELECT COUNT(*) FROM ot_tarefas WHERE ot_id = ? AND concluida = 0', [$otId]);
@@ -177,8 +174,8 @@ if ($acao === 'status' && is_post()) {
                 }
                 update('ordens_trabalho', [
                     'status' => 'concluida', 'data_inicio' => $ini, 'data_fim' => $fim,
-                    'horas_parada' => min($horasParada ?? 0, 999999), 'causa_falha' => mb_substr((string)post('causa_falha'), 0, 150) ?: null,
-                    'solucao' => post('solucao') ?: null, 'custo_externo' => post_dec_pos('custo_externo') ?? $o['custo_externo'],
+                    'horas_parada' => min($horasParada ?? 0, OT_LIMITE_PARADA), 'causa_falha' => (mb_substr((string)post('causa_falha'), 0, 150) ?: $o['causa_falha']) ?: null,
+                    'solucao' => (post('solucao') ?: $o['solucao']) ?: null, 'custo_externo' => post_dec_pos('custo_externo') ?? $o['custo_externo'],
                     'leitura_contador' => $leitura,
                 ], $otId);
                 // leitura do contador do plano (uma por OT, mesmo se reaberta e concluída de novo)
@@ -302,7 +299,7 @@ if ($acao === 'form') {
     $id = (int)get('id', 0);
     $o = $id ? ot_carregar($id) : ['tipo' => 'corretiva', 'prioridade' => 'media', 'ativo_id' => get('ativo'), 'data_prevista' => date('Y-m-d'), 'custo_externo' => 0, 'responsavel_id' => $u['tecnico_id']];
     if ($id && (!$o || !ot_pode_executar($o))) redirect('ots/ver', ['id' => $id]);
-    if (!empty($_SESSION['old'])) $o = com_old($o);
+    $o = com_old($o, ['custo_externo'], ['ativo_parado']);
     view_header($id ? 'Editar OT' : 'Nova OT', 'ots'); ?>
     <div class="page-title"><h1><?= $id ? 'Editar ' . e($o['numero']) : 'Nova ordem de trabalho' ?></h1>
       <a class="btn btn-outline-secondary btn-sm" href="<?= e($id ? url('ots/ver', ['id' => $id]) : url('ots')) ?>">Voltar</a></div>
@@ -340,9 +337,9 @@ if ($acao === 'ver' || $acao === 'imprimir') {
     $exec = ot_pode_executar($o);
     $atrasada = $aberta && $o['data_prevista'] && $o['data_prevista'] < date('Y-m-d');
 
+    if ($acao === 'imprimir') $GLOBALS['__auto_print'] = true;
     view_header($o['numero'], 'ots');
-    if ($aberta && pode('executar') && !$exec) echo '<div class="alert alert-info py-2 no-print">Esta OT está atribuída a ' . e($o['responsavel']) . '. Somente o responsável ou um gestor pode executá-la.</div>';
-    if ($acao === 'imprimir') $GLOBALS['__scripts'] = '<script>window.print()</script>'; ?>
+    if ($aberta && pode('executar') && !$exec) echo '<div class="alert alert-info py-2 no-print">Esta OT está atribuída a ' . e($o['responsavel']) . '. Somente o responsável ou um gestor pode executá-la.</div>'; ?>
     <div class="page-title">
       <div><div class="small text-muted"><?= badge('tipo_ot', $o['tipo']) ?> <?= badge('prioridade', $o['prioridade']) ?> <?= $atrasada ? '<span class="badge text-bg-danger">ATRASADA</span>' : '' ?></div>
         <h1><?= e($o['numero']) ?> — <?= e($o['titulo']) ?> <?= badge('ot_status', $o['status']) ?></h1></div>
@@ -424,7 +421,7 @@ if ($acao === 'ver' || $acao === 'imprimir') {
         <div class="card mb-3" id="materiais"><div class="card-header bg-white fw-semibold">Materiais / peças</div><div class="card-body">
           <div class="table-responsive"><table class="table table-sm"><thead><tr><th>Código</th><th>Descrição</th><th>Qtd</th><th class="text-end">Custo un.</th><th class="text-end">Total</th><th>Estoque</th><th></th></tr></thead><tbody>
           <?php foreach ($mat as $m): ?><tr><td><?= e($m['codigo']) ?></td><td><?= e($m['descricao']) ?></td><td><?= num($m['quantidade'], 2) ?> <?= e($m['unidade']) ?></td>
-            <td class="text-end"><?= moeda($m['custo_unitario']) ?></td><td class="text-end"><?= moeda($m['quantidade'] * $m['custo_unitario']) ?></td>
+            <td class="text-end"><?= moeda_unit($m['custo_unitario']) ?></td><td class="text-end"><?= moeda($m['quantidade'] * $m['custo_unitario']) ?></td>
             <td><?= $m['baixado'] ? '<span class="badge text-bg-success">baixado</span>' : '<span class="badge text-bg-warning">reservado</span> <small class="text-muted">saldo ' . num($m['estoque_atual'], 2) . '</small>' ?></td>
             <td class="text-end text-nowrap"><?php if ($exec): ?>
               <?php if (!$m['baixado']): ?><form method="post" action="<?= e(url('ots/mat_baixar')) ?>" class="d-inline"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $o['id'] ?>"><input type="hidden" name="item_id" value="<?= $m['id'] ?>"><button class="btn btn-link btn-sm p-0 no-print">dar baixa</button></form><?php endif; ?>
@@ -460,7 +457,7 @@ if ($acao === 'ver' || $acao === 'imprimir') {
             <div class="mb-2"><label class="form-label">Início</label><input type="datetime-local" class="form-control form-control-sm" name="data_inicio" value="<?= e(old('data_inicio') ?: input_dt($o['data_inicio'] ?: date('Y-m-d H:i'))) ?>"></div>
             <div class="mb-2"><label class="form-label">Término</label><input type="datetime-local" class="form-control form-control-sm" name="data_fim" max="<?= e(input_dt(date('Y-m-d H:i'))) ?>" value="<?= e(old('data_fim') ?: input_dt(date('Y-m-d H:i'))) ?>"></div>
             <?php if ($o['ativo_parado']): ?>
-              <div class="mb-2"><label class="form-label">Horas de parada do ativo</label><input class="form-control form-control-sm" inputmode="decimal" name="horas_parada" value="<?= e(old('horas_parada') !== null ? num(old('horas_parada')) : '') ?>" placeholder="vazio = calcular automaticamente">
+              <div class="mb-2"><label class="form-label">Horas de parada do ativo</label><input class="form-control form-control-sm" inputmode="decimal" name="horas_parada" value="<?= e(old_num('horas_parada') !== null ? num(old_num('horas_parada')) : '') ?>" placeholder="vazio = calcular automaticamente">
                 <div class="form-text">Automático: da abertura do pedido (ou início) até o término.</div></div>
             <?php endif; ?>
             <?php if ($o['tipo'] === 'corretiva'): ?>
@@ -469,11 +466,11 @@ if ($acao === 'ver' || $acao === 'imprimir') {
                   <option value="Desgaste natural"><option value="Falta de lubrificação"><option value="Falha elétrica"><option value="Operação inadequada"><option value="Sobrecarga"><option value="Corrosão"></datalist></div>
             <?php endif; ?>
             <?php if ($o['plano_gatilho'] === 'contador'): ?>
-              <div class="mb-2"><label class="form-label">Leitura do contador na execução</label><input class="form-control form-control-sm" inputmode="decimal" name="leitura_contador" value="<?= e(old('leitura_contador') !== null ? num(old('leitura_contador'), 1) : '') ?>"></div>
+              <div class="mb-2"><label class="form-label">Leitura do contador na execução</label><input class="form-control form-control-sm" inputmode="decimal" name="leitura_contador" value="<?= e(old_num('leitura_contador') !== null ? num(old_num('leitura_contador'), 1) : '') ?>"></div>
             <?php endif; ?>
-            <div class="mb-2"><label class="form-label">Custo externo (R$)</label><input class="form-control form-control-sm" inputmode="decimal" name="custo_externo" value="<?= num(old('custo_externo', $o['custo_externo'])) ?>"></div>
+            <div class="mb-2"><label class="form-label">Custo externo (R$)</label><input class="form-control form-control-sm" inputmode="decimal" name="custo_externo" value="<?= num(old_num('custo_externo', $o['custo_externo'])) ?>"></div>
             <div class="mb-2"><label class="form-label">Trabalho realizado</label><textarea class="form-control form-control-sm" name="solucao" rows="3"><?= e(old('solucao', $o['solucao'])) ?></textarea></div>
-            <div class="form-check mb-2"><input class="form-check-input" type="checkbox" name="ignorar_tarefas" value="1" id="ig"><label class="form-check-label small" for="ig">Concluir mesmo com tarefas pendentes</label></div>
+            <div class="form-check mb-2"><input class="form-check-input" type="checkbox" name="ignorar_tarefas" value="1" id="ig" <?= old('ignorar_tarefas') ? 'checked' : '' ?>><label class="form-check-label small" for="ig">Concluir mesmo com tarefas pendentes</label></div>
             <button class="btn btn-success w-100">Concluir ordem de trabalho</button>
           </form>
           <?php if (pode('gerir')): ?>
@@ -493,49 +490,56 @@ if ($acao === 'ver' || $acao === 'imprimir') {
     <?php view_footer(); exit;
 }
 
-/* ================= LISTA ================= */
-$f = get('f', 'pendentes');
-$w = []; $prm = [];
+/* ================= LISTA (tabela server-side) ================= */
+$f = in_array(get('f'), ['pendentes', 'atrasadas', 'minhas', 'concluidas', 'todas'], true) ? get('f') : 'pendentes';
+$hoje = date('Y-m-d');
+$atrasada = fn($o) => in_array($o['status'], ['aberta', 'planejada', 'em_execucao', 'aguardando_pecas'], true) && $o['data_prevista'] && $o['data_prevista'] < $hoje;
+$t = new Tabela('ots',
+    'ordens_trabalho o LEFT JOIN ativos a ON a.id = o.ativo_id LEFT JOIN tecnicos t ON t.id = o.responsavel_id',
+    'o.id, o.numero, o.tipo, o.prioridade, o.status, o.titulo, o.data_abertura, o.data_prevista, o.data_inicio, o.data_fim, o.horas_parada,
+     a.codigo AS ativo_codigo, a.nome AS ativo_nome, t.nome AS responsavel, o.custo_mo + o.custo_mat + o.custo_externo AS custo', [
+    'numero' => ['rotulo' => 'Nº', 'ordem' => 'o.id', 'busca' => 'o.numero', 'classe' => 'text-nowrap', 'render' => fn($o) => e($o['numero'])],
+    'tipo' => ['rotulo' => 'Tipo', 'ordem' => 'o.tipo', 'classe' => 'd-none d-md-table-cell', 'render' => fn($o) => badge('tipo_ot', $o['tipo']), 'csv' => fn($o) => rotulo('tipo_ot', $o['tipo'])],
+    'titulo' => ['rotulo' => 'Título', 'ordem' => 'o.titulo', 'busca' => 'o.titulo',
+                 'render' => fn($o) => e($o['titulo']) . '<div class="small text-muted d-md-none">' . e($o['ativo_codigo']) . '</div>', 'csv' => fn($o) => $o['titulo']],
+    'ativo' => ['rotulo' => 'Ativo', 'ordem' => 'a.codigo', 'busca' => "CONCAT_WS(' ', a.codigo, a.nome)", 'classe' => 'd-none d-md-table-cell',
+                'render' => fn($o) => '<span title="' . e($o['ativo_nome']) . '">' . e($o['ativo_codigo']) . '</span>', 'csv' => fn($o) => trim($o['ativo_codigo'] . ' ' . $o['ativo_nome'])],
+    'resp' => ['rotulo' => 'Responsável', 'ordem' => 't.nome', 'busca' => 't.nome', 'classe' => 'd-none d-lg-table-cell', 'render' => fn($o) => e($o['responsavel'])],
+    'prevista' => ['rotulo' => $f === 'concluidas' ? 'Concluída' : 'Prevista', 'ordem' => $f === 'concluidas' ? 'o.data_fim' : "COALESCE(o.data_prevista, '9999-12-31')",
+                   'render' => fn($o) => $f === 'concluidas' ? dt($o['data_fim']) : ($atrasada($o) ? '<span class="text-danger fw-semibold">' . dt($o['data_prevista']) . '</span>' : dt($o['data_prevista']))],
+    'prioridade' => ['rotulo' => 'Prioridade', 'ordem' => "FIELD(o.prioridade, 'urgente', 'alta', 'media', 'baixa')", 'classe' => 'd-none d-md-table-cell',
+                     'render' => fn($o) => badge('prioridade', $o['prioridade']), 'csv' => fn($o) => rotulo('prioridade', $o['prioridade'])],
+    'custo' => ['rotulo' => 'Custo', 'ordem' => '(o.custo_mo + o.custo_mat + o.custo_externo)', 'classe' => 'text-end d-none d-lg-table-cell', 'render' => fn($o) => moeda($o['custo']), 'csv' => fn($o) => num($o['custo'])],
+    'status' => ['rotulo' => 'Status', 'ordem' => 'o.status', 'render' => fn($o) => badge('ot_status', $o['status']), 'csv' => fn($o) => rotulo('ot_status', $o['status'])],
+    'abertura' => ['rotulo' => 'Abertura', 'csv' => fn($o) => dt($o['data_abertura'], true), 'render' => fn($o) => '', 'classe' => 'd-none'],
+    'parada' => ['rotulo' => 'Horas parada', 'csv' => fn($o) => num($o['horas_parada']), 'render' => fn($o) => '', 'classe' => 'd-none'],
+]);
+$t->desempate = 'o.id';
+$t->placeholder = 'Nº, título, ativo, responsável…';
+$t->href = fn($o) => url('ots/ver', ['id' => $o['id']]);
+$t->classeLinha = fn($o) => $atrasada($o) ? 'atrasada' : '';
+$t->vazio = 'Nenhuma ordem de trabalho com estes filtros.';
+if ($f === 'concluidas') { $t->ordemPadrao = 'prevista'; $t->dirPadrao = 'desc'; } else { $t->ordemPadrao = 'prioridade'; $t->dirPadrao = 'asc'; }
 match ($f) {
-    'pendentes'  => $w[] = "o.status IN (" . STATUS_PENDENTES . ")",
-    'atrasadas'  => $w[] = "o.status IN (" . STATUS_PENDENTES . ") AND o.data_prevista < CURDATE()",
-    'minhas'     => $w[] = "o.status IN (" . STATUS_PENDENTES . ") AND o.responsavel_id = " . (int)($u['tecnico_id'] ?? 0),
-    'concluidas' => $w[] = "o.status = 'concluida'",
+    'pendentes'  => $t->where[] = 'o.status IN (' . STATUS_PENDENTES . ')',
+    'atrasadas'  => $t->where[] = 'o.status IN (' . STATUS_PENDENTES . ') AND o.data_prevista < CURDATE()',
+    'minhas'     => $t->where[] = 'o.status IN (' . STATUS_PENDENTES . ') AND o.responsavel_id = ' . (int)($u['tecnico_id'] ?? 0),
+    'concluidas' => $t->where[] = "o.status = 'concluida'",
     default      => null,
 };
-if ($t = get('tipo')) { $w[] = 'o.tipo = ?'; $prm[] = $t; }
-if ($s = get('status')) { $w[] = 'o.status = ?'; $prm[] = $s; }
-if ($r = get('resp')) { $w[] = 'o.responsavel_id = ?'; $prm[] = (int)$r; }
-if ($a = get('ativo')) { $w[] = 'o.ativo_id IN (' . implode(',', descendentes('ativos', (int)$a)) . ')'; }
-if (is_string($b = get('q'))) {
-    $b = mb_substr(trim($b), 0, 60);
-    if (preg_match('/^(OT)?\d{4}-\d+$/i', $b)) { $w[] = 'o.numero LIKE ?'; $prm[] = (stripos($b, 'OT') === 0 ? strtoupper($b) : "OT$b") . '%'; }
-    else { $w[] = '(o.numero LIKE ? OR o.titulo LIKE ? OR o.ativo_id IN (SELECT id FROM ativos WHERE codigo LIKE ? OR nome LIKE ?))'; array_push($prm, "%$b%", "%$b%", "$b%", "%$b%"); }
-}
-if (is_string($di = get('de')) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $di)) { $w[] = 'o.data_abertura >= ?'; $prm[] = $di; }
-if (is_string($df = get('ate')) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $df)) { $w[] = 'o.data_abertura < ? + INTERVAL 1 DAY'; $prm[] = $df; }
-$sql = "SELECT o.*, a.codigo AS ativo_codigo, a.nome AS ativo_nome, t.nome AS responsavel,
-          " . SQL_CUSTO_OT . " + " . SQL_CUSTO_MAT . " + o.custo_externo AS custo
-        FROM ordens_trabalho o LEFT JOIN ativos a ON a.id=o.ativo_id LEFT JOIN tecnicos t ON t.id=o.responsavel_id "
-     . ($w ? 'WHERE ' . implode(' AND ', $w) : '')
-     . ($f === 'concluidas' ? ' ORDER BY o.data_fim DESC' : " ORDER BY FIELD(o.prioridade,'urgente','alta','media','baixa'), o.data_prevista IS NULL, o.data_prevista, o.id");
-
-if (get('csv')) {
-    csv_download('ordens_trabalho', ['Nº', 'Tipo', 'Prioridade', 'Status', 'Título', 'Ativo', 'Responsável', 'Abertura', 'Prevista', 'Início', 'Término', 'Horas parada', 'Custo total'],
-        array_map(fn($o) => [$o['numero'], rotulo('tipo_ot', $o['tipo']), rotulo('prioridade', $o['prioridade']), rotulo('ot_status', $o['status']), $o['titulo'],
-            trim($o['ativo_codigo'] . ' ' . $o['ativo_nome']), $o['responsavel'], dt($o['data_abertura'], true), dt($o['data_prevista']), dt($o['data_inicio'], true), dt($o['data_fim'], true),
-            num($o['horas_parada']), num($o['custo'])], q($sql, $prm)));
-}
-$pg = paginar($sql, $prm, 30);
+if (array_key_exists((string)get('tipo'), ROTULOS['tipo_ot'])) { $t->where[] = 'o.tipo = ?'; $t->params[] = get('tipo'); }
+if (array_key_exists((string)get('status'), ROTULOS['ot_status'])) { $t->where[] = 'o.status = ?'; $t->params[] = get('status'); }
+if ($r = (int)get('resp')) { $t->where[] = 'o.responsavel_id = ?'; $t->params[] = $r; }
+if ($a = (int)get('ativo')) { $t->where[] = 'o.ativo_id IN (' . implode(',', descendentes('ativos', $a)) . ')'; }
+if (is_string($di = get('de')) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $di)) { $t->where[] = 'o.data_abertura >= ?'; $t->params[] = $di; }
+if (is_string($df = get('ate')) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $df)) { $t->where[] = 'o.data_abertura < ? + INTERVAL 1 DAY'; $t->params[] = $df; }
+$t->responder('ordens_trabalho');
 
 view_header('Ordens de trabalho', 'ots'); ?>
 <div class="page-title"><h1>Ordens de trabalho</h1>
-  <div class="d-flex gap-2">
-    <a class="btn btn-outline-secondary btn-sm" href="?<?= e(http_build_query($_GET + ['csv' => 1])) ?>"><i class="bi bi-filetype-csv"></i> CSV</a>
-    <?php if (pode('executar')): ?><a class="btn btn-warning btn-sm" href="<?= e(url('ots/form')) ?>"><i class="bi bi-plus-lg"></i> Nova OT</a><?php endif; ?>
-  </div>
+  <?php if (pode('executar')): ?><a class="btn btn-warning btn-sm" href="<?= e(url('ots/form')) ?>"><i class="bi bi-plus-lg"></i> Nova OT</a><?php endif; ?>
 </div>
-<div class="btn-group btn-group-sm mb-2 flex-wrap">
+<div class="btn-group btn-group-sm mb-2 flex-wrap" role="group" aria-label="Situação">
   <?php foreach (['pendentes' => 'Pendentes', 'atrasadas' => 'Atrasadas', 'minhas' => 'Minhas', 'concluidas' => 'Concluídas', 'todas' => 'Todas'] as $k => $r):
       if ($k === 'minhas' && empty($u['tecnico_id'])) continue; ?>
     <a class="btn btn-outline-secondary <?= $f === $k ? 'active' : '' ?>" href="<?= e(url('ots', ['f' => $k])) ?>"><?= $r ?></a>
@@ -543,21 +547,12 @@ view_header('Ordens de trabalho', 'ots'); ?>
 </div>
 <form class="card card-body py-2 mb-3" method="get"><input type="hidden" name="r" value="ots"><input type="hidden" name="f" value="<?= e($f) ?>">
   <div class="row g-2">
-    <div class="col-md-3"><input class="form-control form-control-sm" name="q" placeholder="Nº, título, ativo…" value="<?= e(get('q')) ?>"></div>
-    <div class="col-md-2"><?= sel('tipo', lista_rotulos('tipo_ot'), get('tipo'), true, 'class="form-select form-select-sm" aria-label="Tipo"', 'Todos os tipos') ?></div>
-    <div class="col-md-2"><?= sel('status', lista_rotulos('ot_status'), get('status'), true, 'class="form-select form-select-sm" aria-label="Status"', 'Todos os status') ?></div>
-    <div class="col-md-2"><?= sel('resp', $tecnicos, get('resp'), true, 'class="form-select form-select-sm" aria-label="Responsável"', 'Todos os responsáveis') ?></div>
-    <div class="col-6 col-md-1"><input type="date" class="form-control form-control-sm" name="de" value="<?= e(get('de')) ?>" title="Aberta a partir de" aria-label="Aberta a partir de"></div>
-    <div class="col-6 col-md-1"><input type="date" class="form-control form-control-sm" name="ate" value="<?= e(get('ate')) ?>" title="Aberta até" aria-label="Aberta até"></div>
-    <div class="col-md-1"><button class="btn btn-sm btn-secondary w-100">Filtrar</button></div>
+    <div class="col-md-3"><?= sel('tipo', lista_rotulos('tipo_ot'), get('tipo'), true, 'class="form-select form-select-sm" aria-label="Tipo" data-auto-submit', 'Todos os tipos') ?></div>
+    <div class="col-md-3"><?= sel('status', lista_rotulos('ot_status'), get('status'), true, 'class="form-select form-select-sm" aria-label="Status" data-auto-submit', 'Todos os status') ?></div>
+    <div class="col-md-2"><?= sel('resp', $tecnicos, get('resp'), true, 'class="form-select form-select-sm" aria-label="Responsável" data-auto-submit', 'Todos os responsáveis') ?></div>
+    <div class="col-6 col-md-2"><input type="date" class="form-control form-control-sm" name="de" value="<?= e(get('de')) ?>" title="Aberta a partir de" aria-label="Aberta a partir de" data-auto-submit></div>
+    <div class="col-6 col-md-2"><input type="date" class="form-control form-control-sm" name="ate" value="<?= e(get('ate')) ?>" title="Aberta até" aria-label="Aberta até" data-auto-submit></div>
   </div>
 </form>
-<div class="card"><div class="table-responsive"><table class="table table-hover table-sm mb-0">
-<thead><tr><th>Nº</th><th class="d-none d-md-table-cell">Tipo</th><th>Título</th><th class="d-none d-md-table-cell">Ativo</th><th class="d-none d-lg-table-cell">Responsável</th><th>Prevista</th><th class="d-none d-md-table-cell">Prioridade</th><th class="text-end d-none d-lg-table-cell">Custo</th><th>Status</th></tr></thead><tbody>
-<?php foreach ($pg['linhas'] as $o): $atr = !in_array($o['status'], ['concluida', 'cancelada']) && $o['data_prevista'] && $o['data_prevista'] < date('Y-m-d'); ?>
-  <tr data-href="<?= e(url('ots/ver', ['id' => $o['id']])) ?>" class="<?= $atr ? 'atrasada' : '' ?>"><td class="text-nowrap"><?= e($o['numero']) ?></td><td class="d-none d-md-table-cell"><?= badge('tipo_ot', $o['tipo']) ?></td><td><?= e($o['titulo']) ?><div class="small text-muted d-md-none"><?= e($o['ativo_codigo']) ?></div></td>
-  <td class="d-none d-md-table-cell"><?= e($o['ativo_codigo']) ?></td><td class="d-none d-lg-table-cell"><?= e($o['responsavel']) ?></td><td class="<?= $atr ? 'text-danger fw-semibold' : '' ?>"><?= dt($o['data_prevista']) ?></td>
-  <td class="d-none d-md-table-cell"><?= badge('prioridade', $o['prioridade']) ?></td><td class="text-end d-none d-lg-table-cell"><?= moeda($o['custo']) ?></td><td><?= badge('ot_status', $o['status']) ?></td></tr>
-<?php endforeach; if (!$pg['linhas']): ?><tr><td colspan="9" class="text-center text-muted py-4">Nenhuma ordem de trabalho.</td></tr><?php endif; ?>
-</tbody></table></div><div class="card-footer bg-white"><?= paginacao_html($pg) ?></div></div>
+<?= $t->html() ?>
 <?php view_footer();

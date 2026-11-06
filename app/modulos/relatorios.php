@@ -67,7 +67,7 @@ $totalCausas = max(1, array_sum(array_column($causas, 'n')));
 
 view_header('Relatórios & KPIs', 'relatorios'); ?>
 <?php if ($avisoPeriodo): ?><div class="alert alert-warning"><?= e($avisoPeriodo) ?></div><?php endif; ?>
-<div class="page-title"><h1>Relatórios e indicadores</h1><button class="btn btn-outline-secondary btn-sm no-print" onclick="window.print()"><i class="bi bi-printer"></i> Imprimir</button></div>
+<div class="page-title"><h1>Relatórios e indicadores</h1><button class="btn btn-outline-secondary btn-sm no-print" data-print><i class="bi bi-printer"></i> Imprimir</button></div>
 <form class="card card-body py-2 mb-3 no-print" method="get"><input type="hidden" name="r" value="relatorios"><div class="row g-2 align-items-end">
   <div class="col-md-2"><label class="form-label">De</label><input type="date" class="form-control form-control-sm" name="de" value="<?= e($ini) ?>"></div>
   <div class="col-md-2"><label class="form-label">Até</label><input type="date" class="form-control form-control-sm" name="ate" value="<?= e($fim) ?>"></div>
@@ -90,8 +90,17 @@ view_header('Relatórios & KPIs', 'relatorios'); ?>
 </div>
 
 <div class="row g-3 mb-3">
-  <div class="col-lg-8"><div class="card h-100"><div class="card-header bg-white fw-semibold">Custo de manutenção por mês (12 meses)</div><div class="card-body"><canvas id="gCusto" height="110"></canvas></div></div></div>
-  <div class="col-lg-4"><div class="card h-100"><div class="card-header bg-white fw-semibold">OTs por tipo no período</div><div class="card-body"><canvas id="gTipo"></canvas></div></div></div>
+  <div class="col-lg-8"><div class="card h-100"><div class="card-header bg-white fw-semibold">Custo de manutenção por mês (12 meses)</div><div class="card-body"><canvas id="gCusto" height="110" role="img" aria-label="Gráfico de custo por mês" <?= grafico_attr([
+    'type' => 'line', 'moeda' => true,
+    'data' => ['labels' => $serie['labels'], 'datasets' => [['label' => 'Custo (R$)', 'data' => $serie['custo'], 'borderColor' => '#0d6efd', 'backgroundColor' => 'rgba(13,110,253,.1)', 'fill' => true, 'tension' => .3]]],
+    'options' => ['plugins' => ['legend' => ['display' => false]]],
+]) ?>></canvas></div></div></div>
+  <div class="col-lg-4"><div class="card h-100"><div class="card-header bg-white fw-semibold">OTs por tipo no período</div><div class="card-body"><canvas id="gTipo" role="img" aria-label="Gráfico de OTs por tipo" <?= grafico_attr([
+    'type' => 'doughnut',
+    'data' => ['labels' => array_map(fn($t) => rotulo('tipo_ot', $t['tipo']), $porTipo),
+               'datasets' => [['data' => array_map('intval', array_column($porTipo, 'n')), 'backgroundColor' => array_map(fn($t) => CORES_TIPO[$t['tipo']] ?? '#999', $porTipo)]]],
+    'options' => ['plugins' => ['legend' => ['position' => 'bottom']]],
+]) ?>></canvas></div></div></div>
 </div>
 
 <div class="card mb-3"><div class="card-header bg-white fw-semibold d-flex justify-content-between">Indicadores e custos por ativo <a class="small no-print" href="<?= e($qs('ativos')) ?>">CSV</a></div><div class="table-responsive">
@@ -129,11 +138,5 @@ view_header('Relatórios & KPIs', 'relatorios'); ?>
     <?php if (!$semPlano): ?><li class="list-group-item text-success">Todos cobertos.</li><?php endif; ?></ul></div></div>
 </div>
 <?php
-$tl = array_map(fn($t) => rotulo('tipo_ot', $t['tipo']), $porTipo);
-$tc = array_map(fn($t) => ['corretiva' => '#dc3545', 'preventiva' => '#198754', 'preditiva' => '#0dcaf0', 'inspecao' => '#0d6efd', 'lubrificacao' => '#ffc107', 'calibracao' => '#6c757d', 'melhoria' => '#212529'][$t['tipo']] ?? '#999', $porTipo);
-$GLOBALS['__scripts'] = chart_js() . '<script>
-new Chart(document.getElementById("gCusto"),{type:"line",data:{labels:' . json_encode($serie['labels']) . ',datasets:[{label:"Custo (R$)",data:' . json_encode($serie['custo']) . ',borderColor:"#0d6efd",backgroundColor:"rgba(13,110,253,.1)",fill:true,tension:.3}]},
- options:{plugins:{legend:{display:false}},scales:{y:{beginAtZero:true,ticks:{callback:v=>"R$ "+v.toLocaleString("pt-BR")}}}}});
-new Chart(document.getElementById("gTipo"),{type:"doughnut",data:{labels:' . json_encode($tl) . ',datasets:[{data:' . json_encode(array_map('intval', array_column($porTipo, 'n'))) . ',backgroundColor:' . json_encode($tc) . '}]},options:{plugins:{legend:{position:"bottom"}}}});
-</script>';
+$GLOBALS['__scripts'] = chart_js();
 view_footer();

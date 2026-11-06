@@ -74,10 +74,14 @@ if ($acao === 'salvar' && is_post()) {
     foreach ($c['campos'] as $k => $f) {
         $dados[$k] = match ($f[1]) {
             'select', 'tree' => post_int($k),
-            'money', 'number' => post_dec($k) ?? 0,
+            'money', 'number' => post_dec_pos($k) ?? 0,
             'check' => post($k) ? 1 : 0,
             default => (post($k) === '' ? null : post($k)),
         };
+        if (in_array($f[1], ['money', 'number'], true) && dec_invalido($k)) {
+            flash("O campo \"{$f[0]}\" precisa ser um número positivo.", 'danger');
+            redirect('cadastros/form', ['t' => $t] + ($id ? ['id' => $id] : []));
+        }
         if (!empty($f['req']) && ($dados[$k] === null || $dados[$k] === '')) {
             flash("O campo \"{$f[0]}\" é obrigatório.", 'danger');
             redirect('cadastros/form', ['t' => $t] + ($id ? ['id' => $id] : []));
@@ -114,7 +118,7 @@ if ($acao === 'excluir' && is_post()) {
 if ($acao === 'form') {
     $id = (int)get('id', 0);
     $r = $id ? q1("SELECT * FROM `$tab` WHERE id = ?", [$id]) : [];
-    if (!empty($_SESSION['old']) || !empty($GLOBALS['__old'])) $r = com_old($r);
+    $r = com_old($r, array_keys(array_filter($c['campos'], fn($f) => in_array($f[1], ['money', 'number'], true))), array_keys(array_filter($c['campos'], fn($f) => $f[1] === 'check')));
     if ($id && !$r) redirect('cadastros', ['t' => $t]);
     $novo = !empty($c['f']) ? 'Nova' : 'Novo';
     view_header(($id ? 'Editar ' : "$novo ") . $c['singular'], $menu);
@@ -156,22 +160,30 @@ if ($acao === 'form') {
 }
 
 /* ---------- Lista ---------- */
-$where = ''; $params = [];
-$busca = (string)get('q', '');
-if ($busca !== '' && !empty($c['busca'])) {
-    $where = ' WHERE ' . implode(' OR ', array_map(fn($k) => "`$k` LIKE ?", $c['busca']));
-    $params = array_fill(0, count($c['busca']), "%$busca%");
+if (!empty($c['arvore'])) {
+    $linhas = q("SELECT * FROM `$tab` ORDER BY {$c['ordem']}");
+} else {
+    // tabela server-side: busca nos campos de texto, ordenação pelas colunas simples
+    $cols = [];
+    foreach ($c['lista'] as $k) {
+        $f = $c['campos'][$k];
+        $simples = !in_array($f[1], ['select', 'tree'], true);
+        $cols[$k] = ['rotulo' => $f[0], 'ordem' => $simples ? "x.`$k`" : null,
+                     'busca' => in_array($k, $c['busca'] ?? array_keys(array_filter($c['campos'], fn($ff) => in_array($ff[1], ['text', 'email'], true))), true) ? "x.`$k`" : null,
+                     'classe' => $f[1] === 'money' ? 'text-end' : '',
+                     'render' => fn($l) => valor_lista($c, $opc, $k, $l),
+                     'csv' => fn($l) => match ($f[1]) { 'select' => $opc[$k][$l[$k]] ?? '', 'money' => num($l[$k]), 'check' => $l[$k] ? 'Sim' : 'Não', default => (string)$l[$k] }];
+    }
+    $tb = new Tabela("cad_$t", "`$tab` x", 'x.*', $cols);
+    $tb->ordemPadrao = $c['lista'][0]; $tb->desempate = 'x.id';
+    $tb->href = fn($l) => url('cadastros/form', ['t' => $t, 'id' => $l['id']]);
+    $tb->responder($tab);
 }
-$linhas = q("SELECT * FROM `$tab`$where ORDER BY {$c['ordem']}", $params);
 
 view_header($c['titulo'], $menu);
 ?>
 <div class="page-title"><h1><?= e($c['titulo']) ?></h1>
   <div class="d-flex gap-2">
-    <?php if (!empty($c['busca'])): ?>
-      <form class="d-flex" method="get"><input type="hidden" name="r" value="cadastros"><input type="hidden" name="t" value="<?= e($t) ?>">
-        <input class="form-control form-control-sm" name="q" placeholder="Buscar…" value="<?= e($busca) ?>"></form>
-    <?php endif; ?>
     <a class="btn btn-warning btn-sm" href="<?= e(url('cadastros/form', ['t' => $t])) ?>"><i class="bi bi-plus-lg"></i> Novo</a>
   </div>
 </div>
@@ -199,16 +211,6 @@ view_header($c['titulo'], $menu);
     ?>
   </div></div>
 <?php else: ?>
-  <div class="card"><div class="table-responsive">
-  <table class="table table-hover mb-0">
-    <thead><tr><?php foreach ($c['lista'] as $k): ?><th><?= e($c['campos'][$k][0]) ?></th><?php endforeach; ?></tr></thead>
-    <tbody>
-    <?php foreach ($linhas as $l): ?>
-      <tr data-href="<?= e(url('cadastros/form', ['t' => $t, 'id' => $l['id']])) ?>">
-        <?php foreach ($c['lista'] as $k): ?><td><?= valor_lista($c, $opc, $k, $l) ?></td><?php endforeach; ?>
-      </tr>
-    <?php endforeach; if (!$linhas): ?><tr><td colspan="9" class="text-muted text-center py-4">Nenhum registro.</td></tr><?php endif; ?>
-    </tbody>
-  </table></div></div>
+  <?= $tb->html() ?>
 <?php endif;
 view_footer();

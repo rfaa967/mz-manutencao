@@ -8,7 +8,10 @@ if (is_post() && post('acao') === 'notificacoes') {
 }
 if (is_post()) {
     $atual = (string)post('senha_atual'); $nova = (string)post('senha_nova');
-    if (!password_verify($atual, $u['senha_hash'])) {
+    if (login_bloqueado(mb_strtolower($u['email']))) {
+        flash('Muitas tentativas. Aguarde 15 minutos.', 'danger');
+    } elseif (!password_verify($atual, $u['senha_hash'])) {
+        insert('login_falhas', ['email' => mb_strtolower($u['email']), 'ip' => ip_cliente()]);
         flash('Senha atual incorreta.', 'danger');
     } elseif (mb_strlen($nova) < 8) {
         flash('A nova senha precisa ter ao menos 8 caracteres.', 'danger');
@@ -37,7 +40,7 @@ view_header('Minha conta');
     </dl>
     <hr>
     <form method="post"><?= csrf_field() ?><input type="hidden" name="acao" value="notificacoes">
-      <div class="form-check form-switch"><input class="form-check-input" type="checkbox" role="switch" name="receber_emails" value="1" id="re" <?= $u['receber_emails'] ? 'checked' : '' ?> onchange="this.form.submit()">
+      <div class="form-check form-switch"><input class="form-check-input" type="checkbox" role="switch" name="receber_emails" value="1" id="re" <?= $u['receber_emails'] ? 'checked' : '' ?> data-auto-submit>
         <label class="form-check-label" for="re">Receber notificações por e-mail</label></div>
       <div class="form-text"><?= email_ativo() ? 'Pedidos, OTs atribuídas a você, conclusões e (gestores) resumo diário.' : 'O envio de e-mails está desativado na configuração do sistema.' ?></div>
     </form>

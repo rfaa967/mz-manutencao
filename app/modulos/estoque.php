@@ -57,7 +57,7 @@ if ($acao === 'form') {
     exigir('gerir');
     $id = (int)get('id', 0);
     $a = $id ? q1('SELECT * FROM artigos WHERE id = ?', [$id]) : ['unidade' => 'un', 'ativo' => 1, 'estoque_minimo' => 0];
-    if (!empty($_SESSION['old']) || !empty($GLOBALS['__old'])) $a = com_old($a);
+    $a = com_old($a, ['estoque_minimo', 'estoque_inicial', 'custo_medio'], ['ativo']);
     view_header('Artigo', 'estoque'); ?>
     <div class="page-title"><h1><?= $id ? 'Editar artigo' : 'Novo artigo' ?></h1><a class="btn btn-outline-secondary btn-sm" href="<?= e(url('estoque')) ?>">Voltar</a></div>
     <div class="card"><div class="card-body"><form method="post" action="<?= e(url('estoque/salvar')) ?>"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $id ?: '' ?>">
@@ -122,39 +122,44 @@ if ($acao === 'ver') {
     <?php view_footer(); exit;
 }
 
-/* ---------- Lista ---------- */
-$w = ['a.ativo = 1']; $prm = [];
-if ($b = get('q')) { $w[] = '(a.codigo LIKE ? OR a.descricao LIKE ? OR a.familia LIKE ?)'; array_push($prm, "%$b%", "%$b%", "%$b%"); }
-if (get('abaixo')) $w[] = 'a.estoque_atual < a.estoque_minimo';
-if ($fam = get('familia')) { $w[] = 'a.familia = ?'; $prm[] = $fam; }
-$sql = 'SELECT a.*, f.nome AS fornecedor FROM artigos a LEFT JOIN fornecedores f ON f.id=a.fornecedor_id WHERE ' . implode(' AND ', $w) . ' ORDER BY a.codigo';
-if (get('csv')) {
-    csv_download('estoque', ['Código', 'Descrição', 'Família', 'Unidade', 'Saldo', 'Mínimo', 'Custo médio', 'Valor', 'Fornecedor', 'Localização'],
-        array_map(fn($a) => [$a['codigo'], $a['descricao'], $a['familia'], $a['unidade'], num($a['estoque_atual'], 3), num($a['estoque_minimo'], 3), num($a['custo_medio'], 4), num($a['estoque_atual'] * $a['custo_medio']), $a['fornecedor'], $a['localizacao']], q($sql, $prm)));
-}
-$pg = paginar($sql, $prm, 40);
+/* ---------- Lista (tabela server-side) ---------- */
+$t = new Tabela('estoque', 'artigos a LEFT JOIN fornecedores f ON f.id = a.fornecedor_id',
+    'a.id, a.codigo, a.descricao, a.familia, a.unidade, a.estoque_atual, a.estoque_minimo, a.custo_medio, a.localizacao, f.nome AS fornecedor', [
+    'codigo' => ['rotulo' => 'Código', 'ordem' => 'a.codigo', 'busca' => 'a.codigo', 'classe' => 'text-nowrap', 'render' => fn($a) => e($a['codigo'])],
+    'descricao' => ['rotulo' => 'Descrição', 'ordem' => 'a.descricao', 'busca' => 'a.descricao', 'render' => fn($a) => e($a['descricao'])],
+    'familia' => ['rotulo' => 'Família', 'ordem' => 'a.familia', 'busca' => 'a.familia', 'classe' => 'd-none d-md-table-cell', 'render' => fn($a) => e($a['familia'])],
+    'saldo' => ['rotulo' => 'Saldo', 'ordem' => 'a.estoque_atual', 'classe' => 'text-end text-nowrap',
+                'render' => fn($a) => '<span class="' . ($a['estoque_atual'] < $a['estoque_minimo'] ? 'text-danger fw-semibold' : '') . '">' . num($a['estoque_atual'], 2) . ' ' . e($a['unidade']) . '</span>',
+                'csv' => fn($a) => num($a['estoque_atual'], 3)],
+    'minimo' => ['rotulo' => 'Mínimo', 'ordem' => 'a.estoque_minimo', 'classe' => 'text-end d-none d-md-table-cell', 'render' => fn($a) => num($a['estoque_minimo'], 2), 'csv' => fn($a) => num($a['estoque_minimo'], 3)],
+    'custo' => ['rotulo' => 'Custo médio', 'ordem' => 'a.custo_medio', 'classe' => 'text-end d-none d-lg-table-cell', 'render' => fn($a) => moeda($a['custo_medio']), 'csv' => fn($a) => num($a['custo_medio'], 4)],
+    'valor' => ['rotulo' => 'Valor em estoque', 'ordem' => '(a.estoque_atual * a.custo_medio)', 'classe' => 'text-end d-none d-lg-table-cell',
+                'render' => fn($a) => moeda($a['estoque_atual'] * $a['custo_medio']), 'csv' => fn($a) => num($a['estoque_atual'] * $a['custo_medio'])],
+    'local' => ['rotulo' => 'Local', 'ordem' => 'a.localizacao', 'busca' => 'a.localizacao', 'classe' => 'd-none d-md-table-cell', 'render' => fn($a) => e($a['localizacao'])],
+    'fornecedor' => ['rotulo' => 'Fornecedor', 'busca' => 'f.nome', 'classe' => 'd-none', 'render' => fn($a) => '', 'csv' => fn($a) => $a['fornecedor']],
+]);
+$t->ordemPadrao = 'codigo'; $t->desempate = 'a.id';
+$t->placeholder = 'Código, descrição, família, local, fornecedor…';
+$t->href = fn($a) => url('estoque/ver', ['id' => $a['id']]);
+$t->classeLinha = fn($a) => $a['estoque_atual'] < $a['estoque_minimo'] ? 'atrasada' : '';
+$t->where[] = 'a.ativo = 1';
+if (get('abaixo')) $t->where[] = 'a.estoque_atual < a.estoque_minimo';
+if (is_string($fam = get('familia'))) { $t->where[] = 'a.familia = ?'; $t->params[] = $fam; }
+$t->responder('estoque');
+
 $tot = q1('SELECT COUNT(*) n, SUM(estoque_atual*custo_medio) v, SUM(estoque_atual < estoque_minimo) abaixo FROM artigos WHERE ativo=1');
 view_header('Estoque', 'estoque'); ?>
 <div class="page-title"><h1>Estoque de peças e materiais</h1>
-  <div class="d-flex gap-2">
-    <a class="btn btn-outline-secondary btn-sm" href="?<?= e(http_build_query($_GET + ['csv' => 1])) ?>"><i class="bi bi-filetype-csv"></i> CSV</a>
-    <?php if (pode('gerir')): ?><a class="btn btn-warning btn-sm" href="<?= e(url('estoque/form')) ?>"><i class="bi bi-plus-lg"></i> Novo artigo</a><?php endif; ?>
-  </div></div>
+  <?php if (pode('gerir')): ?><a class="btn btn-warning btn-sm" href="<?= e(url('estoque/form')) ?>"><i class="bi bi-plus-lg"></i> Novo artigo</a><?php endif; ?>
+</div>
 <div class="row g-3 mb-3">
   <div class="col-md-4"><div class="card kpi"><div class="card-body"><div class="rot">Artigos ativos</div><div class="valor"><?= (int)$tot['n'] ?></div></div></div></div>
   <div class="col-md-4"><div class="card kpi"><div class="card-body"><div class="rot">Valor do estoque</div><div class="valor"><?= moeda($tot['v']) ?></div></div></div></div>
   <div class="col-md-4"><a class="text-decoration-none" href="<?= e(url('estoque', ['abaixo' => 1])) ?>"><div class="card kpi"><div class="card-body"><div class="rot">Abaixo do mínimo</div><div class="valor <?= $tot['abaixo'] ? 'text-danger' : '' ?>"><?= (int)$tot['abaixo'] ?></div></div></div></a></div>
 </div>
-<form class="card card-body py-2 mb-3" method="get"><input type="hidden" name="r" value="estoque"><div class="row g-2">
-  <div class="col-md-5"><input class="form-control form-control-sm" name="q" placeholder="Código, descrição, família…" value="<?= e(get('q')) ?>"></div>
-  <div class="col-md-3"><?= sel('familia', opcoes('SELECT DISTINCT familia, familia FROM artigos WHERE familia IS NOT NULL ORDER BY familia'), get('familia'), true, 'class="form-select form-select-sm"') ?></div>
-  <div class="col-md-2"><div class="form-check mt-1"><input class="form-check-input" type="checkbox" name="abaixo" value="1" id="ab" <?= get('abaixo') ? 'checked' : '' ?>><label class="form-check-label small" for="ab">Só abaixo do mínimo</label></div></div>
-  <div class="col-md-2"><button class="btn btn-sm btn-secondary w-100">Filtrar</button></div></div></form>
-<div class="card"><div class="table-responsive"><table class="table table-hover table-sm mb-0">
-<thead><tr><th>Código</th><th>Descrição</th><th>Família</th><th class="text-end">Saldo</th><th class="text-end">Mínimo</th><th class="text-end">Custo médio</th><th>Local</th></tr></thead><tbody>
-<?php foreach ($pg['linhas'] as $a): $baixo = $a['estoque_atual'] < $a['estoque_minimo']; ?>
-  <tr data-href="<?= e(url('estoque/ver', ['id' => $a['id']])) ?>" class="<?= $baixo ? 'atrasada' : '' ?>"><td><?= e($a['codigo']) ?></td><td><?= e($a['descricao']) ?></td><td><?= e($a['familia']) ?></td>
-  <td class="text-end <?= $baixo ? 'text-danger fw-semibold' : '' ?>"><?= num($a['estoque_atual'], 2) ?> <?= e($a['unidade']) ?></td><td class="text-end"><?= num($a['estoque_minimo'], 2) ?></td><td class="text-end"><?= moeda($a['custo_medio']) ?></td><td><?= e($a['localizacao']) ?></td></tr>
-<?php endforeach; if (!$pg['linhas']): ?><tr><td colspan="7" class="text-center text-muted py-4">Nenhum artigo.</td></tr><?php endif; ?>
-</tbody></table></div><div class="card-footer bg-white"><?= paginacao_html($pg) ?></div></div>
+<form class="card card-body py-2 mb-3" method="get"><input type="hidden" name="r" value="estoque"><div class="row g-2 align-items-center">
+  <div class="col-md-4"><?= sel('familia', opcoes('SELECT DISTINCT familia, familia FROM artigos WHERE familia IS NOT NULL ORDER BY familia'), get('familia'), true, 'class="form-select form-select-sm" aria-label="Família" data-auto-submit', 'Todas as famílias') ?></div>
+  <div class="col-md-4"><div class="form-check mb-0"><input class="form-check-input" type="checkbox" name="abaixo" value="1" id="ab" data-auto-submit <?= get('abaixo') ? 'checked' : '' ?>><label class="form-check-label small" for="ab">Só abaixo do mínimo</label></div></div>
+</div></form>
+<?= $t->html() ?>
 <?php view_footer();

@@ -30,3 +30,6 @@
 .m-kv dd { margin: 0; }
 .form-control, .form-select { font-size: 16px; } /* evita zoom no iOS */
 #leitor { width: 100%; border-radius: 12px; overflow: hidden; background: #000; min-height: 280px; }
+
+.m-lista .badge { align-self: flex-start; white-space: nowrap; }
+.m-lista .d-flex { align-items: flex-start; }

@@ -21,7 +21,7 @@ $cards = [
     ['OTs pendentes', $k['abertas'], 'wrench', 'primary', url('ots')],
     ['Atrasadas', $k['atrasadas'], 'alarm', $k['atrasadas'] ? 'danger' : 'success', url('ots', ['f' => 'atrasadas'])],
     pode('gerir') ? ['Pedidos a avaliar', $k['pedidos_abertos'], 'megaphone', $k['pedidos_abertos'] ? 'warning' : 'success', url('pedidos')]
-                  : ['Minhas OTs abertas', count($minhas), 'person-gear', 'primary', url('ots', ['f' => 'minhas'])],
+                  : ['Minhas OTs abertas', $u['tecnico_id'] ? (int)qv('SELECT COUNT(*) FROM ordens_trabalho WHERE responsavel_id = ? AND status IN (' . STATUS_PENDENTES . ')', [$u['tecnico_id']]) : 0, 'person-gear', 'primary', url('ots', ['f' => 'minhas'])],
     ['Disponibilidade 30d', $k['disponibilidade'] !== null ? num($k['disponibilidade'], 1) . '%' : '—', 'activity', 'success', $rel],
     ['MTTR 30d', $k['mttr'] !== null ? num($k['mttr'], 1) . ' h' : '—', 'hourglass-split', 'info', $rel],
     ['% Planejada 30d', $k['pct_planejada'] !== null ? num($k['pct_planejada'], 0) . '%' : '—', 'calendar-check', 'info', $rel],
@@ -45,7 +45,14 @@ view_header('Painel', 'dashboard'); ?>
 </div>
 
 <div class="row g-3 mb-3">
-  <div class="col-lg-8"><div class="card h-100"><div class="card-header bg-white fw-semibold">OTs concluídas por mês</div><div class="card-body"><canvas id="gMes" height="110"></canvas></div></div></div>
+  <div class="col-lg-8"><div class="card h-100"><div class="card-header bg-white fw-semibold">OTs concluídas por mês</div><div class="card-body"><canvas id="gMes" height="110" role="img" aria-label="Gráfico de OTs concluídas por mês" <?= grafico_attr([
+    'type' => 'bar',
+    'data' => ['labels' => $serie['labels'], 'datasets' => [
+        ['label' => 'Corretivas', 'data' => $serie['corr'], 'backgroundColor' => '#dc3545'],
+        ['label' => 'Planejadas', 'data' => $serie['plan'], 'backgroundColor' => '#198754'],
+        ['label' => 'Melhorias', 'data' => $serie['melh'], 'backgroundColor' => '#6c757d']]],
+    'options' => ['responsive' => true, 'scales' => ['x' => ['stacked' => true], 'y' => ['stacked' => true, 'beginAtZero' => true, 'ticks' => ['precision' => 0]]], 'plugins' => ['legend' => ['position' => 'bottom']]],
+]) ?>></canvas></div></div></div>
   <div class="col-lg-4"><div class="card h-100"><div class="card-header bg-white fw-semibold">Ativos parados / em manutenção</div><ul class="list-group list-group-flush">
     <?php foreach ($parados as $a): ?><li class="list-group-item d-flex justify-content-between"><a href="<?= e(url('ativos/ver', ['id' => $a['id']])) ?>"><?= e($a['codigo'] . ' · ' . $a['nome']) ?></a><?= badge('ativo_status', $a['status']) ?></li><?php endforeach; ?>
     <?php if (!$parados): ?><li class="list-group-item text-success"><i class="bi bi-check-circle"></i> Todos os ativos operacionais.</li><?php endif; ?>
@@ -77,9 +84,5 @@ view_header('Painel', 'dashboard'); ?>
   <?php endif; ?>
 </div>
 <?php
-$GLOBALS['__scripts'] = chart_js() . '<script>new Chart(document.getElementById("gMes"),{type:"bar",data:{labels:' . json_encode($serie['labels']) . ',datasets:[
- {label:"Corretivas",data:' . json_encode($serie['corr']) . ',backgroundColor:"#dc3545"},
- {label:"Planejadas",data:' . json_encode($serie['plan']) . ',backgroundColor:"#198754"},
- {label:"Melhorias",data:' . json_encode($serie['melh']) . ',backgroundColor:"#6c757d"}]},
- options:{responsive:true,scales:{x:{stacked:true},y:{stacked:true,beginAtZero:true,ticks:{precision:0}}},plugins:{legend:{position:"bottom"}}}});</script>';
+$GLOBALS['__scripts'] = chart_js();
 view_footer();

@@ -8,11 +8,11 @@ CREATE TABLE IF NOT EXISTS sequencias (
 
 INSERT IGNORE INTO sequencias (serie, ano, ultimo)
   SELECT 'OT', CAST(SUBSTRING(numero, 3, 4) AS UNSIGNED), MAX(CAST(SUBSTRING_INDEX(numero, '-', -1) AS UNSIGNED))
-  FROM ordens_trabalho WHERE numero LIKE 'OT____-%' GROUP BY SUBSTRING(numero, 3, 4);
+  FROM ordens_trabalho WHERE numero LIKE 'OT____-%' GROUP BY CAST(SUBSTRING(numero, 3, 4) AS UNSIGNED);
 
 INSERT IGNORE INTO sequencias (serie, ano, ultimo)
   SELECT 'PT', CAST(SUBSTRING(numero, 3, 4) AS UNSIGNED), MAX(CAST(SUBSTRING_INDEX(numero, '-', -1) AS UNSIGNED))
-  FROM pedidos WHERE numero LIKE 'PT____-%' GROUP BY SUBSTRING(numero, 3, 4);
+  FROM pedidos WHERE numero LIKE 'PT____-%' GROUP BY CAST(SUBSTRING(numero, 3, 4) AS UNSIGNED);
 
 CREATE TABLE IF NOT EXISTS login_falhas (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,

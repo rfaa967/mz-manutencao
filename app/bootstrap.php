@@ -5,6 +5,7 @@ define('APP_ROOT', dirname(__DIR__));
 
 $cfgFile = APP_ROOT . '/config/config.php';
 if (!is_file($cfgFile)) {
+    if (PHP_SAPI === 'cli') { fwrite(STDERR, "config/config.php não encontrado. Copie config/config.sample.php e ajuste.\n"); exit(1); }
     http_response_code(500);
     exit('Arquivo config/config.php não encontrado. Copie config/config.sample.php e rode install.php.');
 }
@@ -17,10 +18,12 @@ ini_set('log_errors', '1');
 
 require APP_ROOT . '/app/helpers.php';
 require APP_ROOT . '/app/auth.php';
+require APP_ROOT . '/app/seguranca.php';
 require APP_ROOT . '/app/preventiva.php';
 require APP_ROOT . '/app/estoque.php';
 require APP_ROOT . '/app/kpi.php';
 require APP_ROOT . '/app/email.php';
+require APP_ROOT . '/app/tabela.php';
 
 function cfg(string $chave, $padrao = null)
 {

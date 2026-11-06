@@ -3,6 +3,7 @@
 function demo_popular(int $adminId, string $senha): void
 {
     mt_srand(42);
+    $GLOBALS['__sem_email'] = true;   // dados históricos: nada de notificações
     $hash = password_hash($senha, PASSWORD_DEFAULT);
 
     // Localizações
@@ -171,4 +172,5 @@ function demo_popular(int $adminId, string $senha): void
     qx('UPDATE pedidos p JOIN ativos a ON a.id = p.ativo_id SET p.localizacao_id = a.localizacao_id WHERE p.localizacao_id IS NULL');
     // gera as preventivas devidas hoje (inclui as por contador)
     gerar_preventivas($adminId);
+    unset($GLOBALS['__sem_email']);
 }
