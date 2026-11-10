@@ -27,11 +27,13 @@ $cad = [
 <?= cdn_css('bootstrap@5.3.3/dist/css/bootstrap.min.css') ?>
 <?= cdn_css('bootstrap-icons@1.11.3/font/bootstrap-icons.min.css') ?>
 <link href="<?= e(asset('app.css')) ?>?v=<?= (int)@filemtime(APP_ROOT . '/public/assets/app.css') ?>" rel="stylesheet">
-<link rel="icon" href="<?= e(asset('icone.svg')) ?>">
+<?= tema_link() ?>
+<link rel="icon" href="<?= e(marca_favicon_url()) ?>">
+<?= seo_meta() ?>
 <meta name="csrf" content="<?= e(csrf_token()) ?>">
 </head>
 <body<?= !empty($GLOBALS['__auto_print']) ? ' data-auto-print="1"' : '' ?>>
-<div class="d-none d-print-block mb-2 border-bottom pb-1"><strong><?= e(cfg('empresa')) ?></strong> · <?= e(cfg('app_nome')) ?> <span class="float-end small"><?= date('d/m/Y H:i') ?></span></div>
+<div class="d-none d-print-block mb-2 border-bottom pb-1"><?php if ($logo = marca_url('logo')): ?><img src="<?= e($logo) ?>" alt="" class="me-2 align-middle" style="max-height:32px"><?php endif; ?><strong><?= e(cfg('empresa')) ?></strong> · <?= e(cfg('app_nome')) ?> <span class="float-end small"><?= date('d/m/Y H:i') ?></span></div>
 <?php if ($u): ?>
 <nav class="navbar navbar-dark bg-dark d-lg-none px-3">
   <button class="btn btn-outline-light btn-sm" data-bs-toggle="offcanvas" data-bs-target="#sidebar" aria-label="Abrir menu"><i class="bi bi-list"></i></button>
@@ -41,7 +43,8 @@ $cad = [
   <aside id="sidebar" class="offcanvas-lg offcanvas-start bg-dark text-white sidebar" tabindex="-1">
     <div class="p-3 border-bottom border-secondary position-relative">
       <button type="button" class="btn-close btn-close-white d-lg-none position-absolute top-0 end-0 m-3" data-bs-dismiss="offcanvas" data-bs-target="#sidebar" aria-label="Fechar menu"></button>
-      <div class="fw-bold fs-5"><i class="bi bi-gear-wide-connected text-warning"></i> <?= e(cfg('app_nome')) ?></div>
+      <?php if ($logo = marca_url('logo')): ?><img src="<?= e($logo) ?>" alt="<?= e(cfg('empresa')) ?>" class="marca-logo mb-2"><?php endif; ?>
+      <div class="fw-bold fs-5"><?php if (!$logo): ?><i class="bi bi-gear-wide-connected text-warning marca-icone"></i> <?php endif; ?><?= e(cfg('app_nome')) ?></div>
       <div class="small text-secondary"><?= e(cfg('empresa')) ?></div>
     </div>
     <ul class="nav flex-column p-2">
@@ -57,6 +60,7 @@ $cad = [
       <?php endif; ?>
       <?php if (pode('admin')): ?>
         <li class="nav-item"><a class="nav-link py-1 ps-4 <?= $menu === 'usuarios' ? 'active' : '' ?>" href="<?= e(url('usuarios')) ?>">Usuários</a></li>
+        <li class="nav-item"><a class="nav-link py-1 ps-4 <?= $menu === 'configuracoes' ? 'active' : '' ?>" href="<?= e(url('configuracoes')) ?>">Configurações</a></li>
       <?php endif; ?>
     </ul>
     <div class="mt-auto p-3 border-top border-secondary small">

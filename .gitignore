@@ -1,4 +1,6 @@
 config/config.php
+storage/*
+!storage/.htaccess
+!storage/uploads/
 storage/uploads/*
 !storage/uploads/.gitkeep
-storage/*.log

@@ -47,3 +47,4 @@ body { background: #f3f5f8; }
 .dt .dt-buscar-btn { display: none; }
 .no-js .dt .dt-buscar-btn { display: inline-block; }
 @media print { .dt-form, .dt .pagination { display: none !important; } }
+.marca-logo { max-width: 100%; max-height: 64px; display: block; }

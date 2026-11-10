@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 define('APP_ROOT', dirname(__DIR__));
+const APP_VERSAO = '3.1.0';
 
 $cfgFile = APP_ROOT . '/config/config.php';
 if (!is_file($cfgFile)) {
@@ -24,6 +25,9 @@ require APP_ROOT . '/app/estoque.php';
 require APP_ROOT . '/app/kpi.php';
 require APP_ROOT . '/app/email.php';
 require APP_ROOT . '/app/tabela.php';
+require APP_ROOT . '/app/configuracoes.php';
+
+config_db_aplicar(); // valores definidos na tela Configurações (sobrepõem o config.php nas chaves permitidas)
 
 function cfg(string $chave, $padrao = null)
 {

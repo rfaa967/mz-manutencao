@@ -22,7 +22,8 @@ view_header('Entrar');
 <div class="row justify-content-center">
   <div class="col-sm-8 col-md-5 col-lg-4">
     <div class="text-center mb-4">
-      <i class="bi bi-gear-wide-connected text-warning" style="font-size:3rem"></i>
+      <?php if ($logo = marca_url('logo')): ?><img src="<?= e($logo) ?>" alt="<?= e(cfg('empresa')) ?>" class="img-fluid" style="max-height:96px">
+      <?php else: ?><i class="bi bi-gear-wide-connected text-warning marca-icone" style="font-size:3rem"></i><?php endif; ?>
       <h1 class="h4 mt-2"><?= e(cfg('app_nome')) ?></h1>
       <div class="text-muted small">Gestão de Manutenção · <?= e(cfg('empresa')) ?></div>
     </div>
