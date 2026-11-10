@@ -58,17 +58,30 @@ function ip_cliente(): string
     return $ip;
 }
 
+/**
+ * Identificador do cliente para limites e bloqueios: o IP, mas com IPv6 reduzido ao prefixo /64
+ * (um único servidor IPv6 controla 2^64 endereços e trocaria de IP a cada requisição).
+ */
+function ip_chave(): string
+{
+    $ip = ip_cliente();
+    $bin = @inet_pton($ip);
+    if ($bin === false || strlen($bin) !== 16) return $ip;
+    if (str_starts_with($bin, str_repeat("\0", 10) . "\xff\xff")) return $ip;   // IPv4 mapeado em IPv6
+    return inet_ntop(substr($bin, 0, 8) . str_repeat("\0", 8)) . '/64';
+}
+
 /* ======================================================================
  * Rate limiting (janela fixa por minuto/hora, contadores no banco)
  * ====================================================================== */
 
 /**
  * Registra um evento e informa se ainda está dentro do limite.
- * @return array{0: bool, 1: int} [permitido, segundos até liberar]
+ * @return array{0: bool, 1: int, 2: int} [permitido, segundos até liberar, contagem na janela]
  */
 function rate_limit(string $regra, string $identificador, int $max, int $janelaSeg = 60): array
 {
-    if ($max <= 0 || !cfg('rate_limit.ativo', true)) return [true, 0];
+    if ($max <= 0 || !cfg('rate_limit.ativo', true)) return [true, 0, 0];
     $agora = time();
     $janela = intdiv($agora, $janelaSeg);
     $chave = hash('sha256', "$regra|$identificador|$janelaSeg");
@@ -79,17 +92,17 @@ function rate_limit(string $regra, string $identificador, int $max, int $janelaS
         if (random_int(1, 200) === 1) qx('DELETE FROM rate_limites WHERE expira_em < ?', [$agora - 60]); // limpeza ocasional
     } catch (PDOException $ex) {
         error_log('[MZManut] rate limit indisponível: ' . $ex->getMessage());
-        return [true, 0];                    // falha do contador não derruba o sistema
+        return [true, 0, 0];                 // falha do contador não derruba o sistema
     }
-    return [$n <= $max, ($janela + 1) * $janelaSeg - $agora];
+    return [$n <= $max, ($janela + 1) * $janelaSeg - $agora, $n];
 }
 
 /** Aplica a regra; se estourar, responde 429 e encerra. */
 function limitar(string $regra, string $identificador, int $max, int $janelaSeg = 60, string $msg = ''): void
 {
-    [$ok, $espera] = rate_limit($regra, $identificador, $max, $janelaSeg);
+    [$ok, $espera, $n] = rate_limit($regra, $identificador, $max, $janelaSeg) + [2 => 0];
     if ($ok) return;
-    auditar('rate_limit', $regra, null, $identificador);
+    if ($n === $max + 1) auditar('rate_limit', $regra, null, $identificador);   // registra uma vez por janela, não a cada 429
     while (ob_get_level() > 0) ob_end_clean();
     http_response_code(429);
     header('Retry-After: ' . max(1, $espera));
@@ -120,7 +133,7 @@ function turnstile_exigido(string $formulario): bool
     if (!in_array($formulario, (array)cfg('turnstile.formularios', ['login']), true)) return false;
     if ($formulario === 'login' && cfg('turnstile.modo_login', 'sempre') === 'apos_falhas') {
         $email = mb_strtolower(trim((string)($_POST['email'] ?? '')));
-        return (int)qv('SELECT COUNT(*) FROM login_falhas WHERE (email = ? OR ip = ?) AND em > NOW() - INTERVAL 15 MINUTE', [$email, ip_cliente()]) >= 3;
+        return (int)qv('SELECT COUNT(*) FROM login_falhas WHERE (email = ? OR ip = ?) AND em > NOW() - INTERVAL 15 MINUTE', [$email, ip_chave()]) >= 3;
     }
     return true;
 }

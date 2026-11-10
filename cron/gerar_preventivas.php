@@ -5,6 +5,8 @@ if (PHP_SAPI !== 'cli') { http_response_code(403); exit; }
 require dirname(__DIR__) . '/app/bootstrap.php';
 $g = gerar_preventivas();
 @touch(APP_ROOT . '/storage/cron_preventivas.ok'); // exibido em Configurações › Sistema
+qx('DELETE FROM login_falhas WHERE em < NOW() - INTERVAL 1 DAY');
+qx('DELETE FROM rate_limites WHERE expira_em < ?', [time() - 3600]);
 echo date('c') . ' — ' . count($g) . " OT(s) preventiva(s) gerada(s)\n";
 foreach ($g as $x) echo "  plano #{$x['plano']['id']} {$x['plano']['titulo']} -> OT #{$x['ot_id']}\n";
 if (!in_array('--sem-resumo', $argv, true)) {

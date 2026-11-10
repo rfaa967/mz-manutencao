@@ -21,6 +21,16 @@ function migracao_prechecagem(string $nome): void
 
 function aplicar_migracoes(?callable $log = null): array
 {
+    // trava: duas execuções simultâneas (duplo clique, dois admins, cron + web) reexecutariam os mesmos comandos
+    if ((int)qv("SELECT GET_LOCK('mzmanut_migracoes', 0)") !== 1) throw new RuntimeException('Já existe uma atualização do banco em andamento. Aguarde e recarregue a página.');
+    @set_time_limit(0);
+    ignore_user_abort(true);
+    try { return aplicar_migracoes_trava($log); }
+    finally { qv("SELECT RELEASE_LOCK('mzmanut_migracoes')"); }
+}
+
+function aplicar_migracoes_trava(?callable $log): array
+{
     migracoes_tabela();
     $feitas = array_column(q('SELECT nome FROM migracoes'), 'nome');
     $arquivos = glob(APP_ROOT . '/database/migracoes/*.sql') ?: [];

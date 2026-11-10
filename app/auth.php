@@ -16,6 +16,14 @@ function sessao_iniciar(): void
     ini_set('session.use_strict_mode', '1');
     ini_set('session.use_only_cookies', '1');
     ini_set('session.gc_maxlifetime', (string)SESSAO_OCIOSA_SEG);   // o PHP não apaga a sessão antes do timeout do sistema
+    // pasta própria: na hospedagem compartilhada o diretório padrão é comum a todos os sites (e o GC de outro app
+    // apagaria as nossas sessões antes do prazo)
+    $dir = APP_ROOT . '/storage/sessions';
+    if (is_dir($dir) || @mkdir($dir, 0700, true)) {
+        session_save_path($dir);
+        ini_set('session.gc_probability', '1');
+        ini_set('session.gc_divisor', '200');
+    }
     session_name('MZMANUT');
     session_set_cookie_params(['httponly' => true, 'samesite' => 'Lax', 'secure' => https_ativo()]);
     session_start();
@@ -91,11 +99,20 @@ function exigir(string $permissao): void
  */
 function login_bloqueado(string $email): bool
 {
-    $ip = ip_cliente();
+    $ip = ip_chave();
     $r = q1("SELECT COALESCE(SUM(email = ? AND ip = ?), 0) par, COALESCE(SUM(ip = ?), 0) por_ip, COALESCE(SUM(email = ?), 0) por_email
              FROM login_falhas WHERE (email = ? OR ip = ?) AND em > NOW() - INTERVAL 15 MINUTE", [$email, $ip, $ip, $email, $email, $ip]);
-    return $r['par'] >= LOGIN_MAX_FALHAS || $r['por_ip'] >= 50 || $r['por_email'] >= 40;
+    if ($r['par'] >= LOGIN_MAX_FALHAS || $r['por_ip'] >= 50) return true;
+    if ($r['por_email'] < 40) return false;
+    // ataque distribuído contra a conta: bloqueia, exceto a partir de um IP onde o próprio dono já entrou
+    // (assim um atacante não consegue trancar o administrador para fora repetindo falhas de vários IPs)
+    return !qv("SELECT 1 FROM auditoria a JOIN usuarios u ON u.id = a.entidade_id
+                WHERE a.acao = 'login' AND a.entidade = 'usuarios' AND u.email = ? AND a.ip = ? AND a.criado_em > NOW() - INTERVAL 90 DAY LIMIT 1",
+               [$email, ip_cliente()]);
 }
+
+/** Hash bcrypt fixo usado quando o e-mail não existe: o tempo de resposta fica igual e não revela contas. */
+const HASH_FALSO = '$2y$10$wXlzXaKLaMepx63BNk5qXOcZjziZW0rVYkho13butNjH79qSBRkoW';
 
 /** @return string|null mensagem de erro, ou null em caso de sucesso */
 function login(string $email, string $senha): ?string
@@ -103,8 +120,9 @@ function login(string $email, string $senha): ?string
     $email = mb_strtolower(trim($email));
     if (login_bloqueado($email)) return 'Muitas tentativas. Aguarde 15 minutos e tente novamente.';
     $u = q1('SELECT * FROM usuarios WHERE email = ? AND ativo = 1', [$email]);
-    if (!$u || !password_verify($senha, $u['senha_hash'])) {
-        insert('login_falhas', ['email' => mb_substr($email, 0, 150), 'ip' => ip_cliente()]);
+    $ok = password_verify($senha, $u['senha_hash'] ?? HASH_FALSO) && $u;
+    if (!$ok) {
+        insert('login_falhas', ['email' => mb_substr($email, 0, 150), 'ip' => ip_chave()]);
         auditar('login_falha', 'usuarios', $u ? (int)$u['id'] : null, $email);
         usleep(300000);
         return 'E-mail ou senha inválidos.';

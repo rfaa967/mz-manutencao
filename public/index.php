@@ -23,6 +23,25 @@ if (is_file(APP_ROOT . '/storage/MANUTENCAO')) {
        . '<div style="font-family:sans-serif;padding:2rem;text-align:center"><h2>Sistema em atualização</h2><p>Voltamos em alguns minutos.</p></div>');
 }
 
+// Rota e rate limit ANTES de abrir sessão: rota inexistente ou cliente acima do limite não cria arquivo de sessão.
+$rota = is_string($_GET['r'] ?? null) ? $_GET['r'] : 'dashboard';
+[$modulo, $acao] = array_pad(explode('/', $rota, 2), 2, 'index');
+$modulo = preg_replace('/[^a-z_]/', '', $modulo);
+$acao   = preg_replace('/[^a-z_]/', '', $acao) ?: 'index';
+
+$modulos = ['login', 'logout', 'dashboard', 'ativos', 'cadastros', 'pedidos', 'ots', 'planos', 'contadores',
+            'estoque', 'calendario', 'relatorios', 'usuarios', 'perfil', 'cron', 'm', 'configuracoes'];
+
+limitar_cfg('geral_ip', ip_chave());
+if (!in_array($modulo, $modulos, true)) { http_response_code(404); exit('Página não encontrada'); }
+
+// HTTP → HTTPS quando o endereço oficial é https (o HSTS só vale a partir da primeira visita segura)
+$appUrl = (string)cfg('app_url', '');
+if (!https_ativo() && str_starts_with($appUrl, 'https://') && strcasecmp((string)parse_url($appUrl, PHP_URL_HOST), (string)preg_replace('/:\d+$/', '', $_SERVER['HTTP_HOST'] ?? '')) === 0) {
+    header('Location: ' . rtrim($appUrl, '/') . ($_SERVER['REQUEST_URI'] ?? '/'), true, 301);
+    exit;
+}
+
 sessao_iniciar();
 ob_start(); // permite descartar a saída parcial se ocorrer um erro
 
@@ -34,19 +53,6 @@ if (is_post() && empty($_POST) && empty($_FILES) && (int)($_SERVER['CONTENT_LENG
     exit;
 }
 
-$rota = is_string($_GET['r'] ?? null) ? $_GET['r'] : 'dashboard';
-[$modulo, $acao] = array_pad(explode('/', $rota, 2), 2, 'index');
-$modulo = preg_replace('/[^a-z_]/', '', $modulo);
-$acao   = preg_replace('/[^a-z_]/', '', $acao) ?: 'index';
-
-$modulos = ['login', 'logout', 'dashboard', 'ativos', 'cadastros', 'pedidos', 'ots', 'planos', 'contadores',
-            'estoque', 'calendario', 'relatorios', 'usuarios', 'perfil', 'cron', 'm', 'configuracoes'];
-
-if (!in_array($modulo, $modulos, true)) { http_response_code(404); exit('Página não encontrada'); }
-
-// Rate limit: por IP em qualquer página e por usuário em envios de formulário
-limitar_cfg('geral_ip', ip_cliente());
-
 if (!in_array($modulo, ['login', 'cron'], true) && !usuario()) {
     // guarda o destino (ex.: QR Code lido sem sessão) para voltar após o login
     if (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'fetch') { http_response_code(401); header('Content-Type: application/json'); exit('{"erro":"Sessão expirada. Entre novamente."}'); }
@@ -54,6 +60,7 @@ if (!in_array($modulo, ['login', 'cron'], true) && !usuario()) {
     redirect('login');
 }
 
+if (usuario()) header('Cache-Control: no-store, private'); // páginas com dados não ficam em cache de navegador/proxy
 if (is_post() && usuario()) limitar_cfg('post_usuario', 'u' . usuario()['id']);
 
 csrf_check();

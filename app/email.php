@@ -36,7 +36,8 @@ function email_enfileirar(array|string $para, string $assunto, string $html, str
         $GLOBALS['__email_shutdown'] = true;
         register_shutdown_function(function () {
             if (session_status() === PHP_SESSION_ACTIVE) session_write_close();       // não prende a sessão durante o SMTP
-            if (function_exists('fastcgi_finish_request')) fastcgi_finish_request(); // responde ao usuário antes de enviar
+            if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();       // responde ao usuário antes de enviar (PHP-FPM)
+            elseif (function_exists('litespeed_finish_request')) litespeed_finish_request(); // idem no LiteSpeed (LSAPI)
             try { email_processar_fila(10); } catch (Throwable $ex) { error_log('[MZManut e-mail] ' . $ex->getMessage()); }
         });
     }
@@ -126,10 +127,14 @@ function smtp_enviar(string $de, string $para, string $mensagem): void
         while (($l = fgets($s, 1024)) !== false) { $txt .= $l; if (strlen($l) < 4 || $l[3] === ' ') break; }
         return [(int)substr($txt, 0, 3), $txt];
     };
-    $cmd = function (?string $c, array $esperado) use ($s, $ler): string {
+    // $rotulo vai na mensagem de erro no lugar do comando: o usuário/senha (base64) nunca aparecem em log, tela ou fila
+    $cmd = function (?string $c, array $esperado, ?string $rotulo = null) use ($s, $ler): string {
         if ($c !== null) fwrite($s, $c . "\r\n");
         [$cod, $txt] = $ler();
-        if (!in_array($cod, $esperado, true)) throw new RuntimeException('SMTP ' . ($c !== null ? strtok($c, ' ') : 'saudação') . ": $txt");
+        if (!in_array($cod, $esperado, true)) {
+            $txt = mb_substr(trim(preg_replace('/[\x00-\x1F\x7F]+/', ' ', $txt)), 0, 200);
+            throw new RuntimeException('SMTP ' . ($rotulo ?? ($c !== null ? strtok($c, ' ') : 'saudação')) . ': ' . ($cod ? $txt : 'resposta inválida (o servidor não é SMTP?)'));
+        }
         return $txt;
     };
     try {
@@ -145,8 +150,8 @@ function smtp_enviar(string $de, string $para, string $mensagem): void
         }
         if (($usr = (string)cfg('email.smtp_usuario')) !== '') {
             $cmd('AUTH LOGIN', [334]);
-            $cmd(base64_encode($usr), [334]);
-            $cmd(base64_encode((string)cfg('email.smtp_senha')), [235]);
+            $cmd(base64_encode($usr), [334], 'AUTH (usuário)');
+            $cmd(base64_encode((string)cfg('email.smtp_senha')), [235], 'AUTH (usuário/senha recusados)');
         }
         $cmd("MAIL FROM:<$de>", [250]);
         $cmd("RCPT TO:<$para>", [250, 251]);

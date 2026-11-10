@@ -1,8 +1,8 @@
 <?php
-// Gatilho HTTP do gerador de preventivas: /index.php?r=cron&token=SEU_TOKEN
+// Gatilho HTTP do gerador de preventivas: curl -H "X-Cron-Token: SEU_TOKEN" https://dominio/index.php?r=cron
 $token = (string)cfg('cron_token', '');
-limitar_cfg('cron_ip', ip_cliente());
-$enviado = $_SERVER['HTTP_X_CRON_TOKEN'] ?? ($_GET['token'] ?? '');
+limitar_cfg('cron_ip', ip_chave());
+$enviado = $_SERVER['HTTP_X_CRON_TOKEN'] ?? '';   // só pelo cabeçalho: na URL o token iria para o log de acesso
 if ($token !== '' && strlen($token) < 24) error_log('[MZManut] cron_token com menos de 24 caracteres: chamadas por URL estão bloqueadas. Gere um novo com: php -r "echo bin2hex(random_bytes(32));"');
 if ($token === '' || strlen($token) < 24 || !is_string($enviado) || !hash_equals($token, $enviado)) { http_response_code(403); exit('forbidden'); }
 $g = gerar_preventivas();

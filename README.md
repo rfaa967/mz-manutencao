@@ -20,6 +20,7 @@ PHP 8.1+ puro (sem framework), PDO/MySQL, Bootstrap 5, Chart.js e FullCalendar v
 | **Interface mobile (PWA)** | Pode ser instalada no celular; tem leitor de QR pela câmera e busca por código. Pela ficha resumida do ativo dá para reportar falha, abrir OT e registrar leitura de contador. A execução da OT tem botões grandes: iniciar/pausar, checklist, apontar +0,5/+1/+2/+4 h, requisitar peça e concluir. O solicitante acompanha os próprios pedidos. Se o QR for lido sem sessão, o sistema pede login e volta para o equipamento. No celular, técnicos e solicitantes entram direto nessa interface. |
 | **Notificações por e-mail** | Avisam: novo pedido (para os gestores), pedido aprovado ou rejeitado (para o solicitante), OT atribuída (para o técnico), serviço concluído (para o solicitante) e o resumo diário (atrasadas, preventivas geradas, ativos parados, estoque baixo). Os envios passam por uma fila, com SMTP próprio (STARTTLS/SSL) ou `mail()`. Cada usuário pode desligar os e-mails em *Minha conta*. |
 | **Listagens** | Todas as listas (OTs, ativos, pedidos, estoque, planos, usuários, cadastros) são tabelas *server-side* no estilo DataTables: busca por vários termos em várias colunas, ordenação clicando no cabeçalho, paginação, itens por página (lembrados por usuário) e exportação CSV do resultado filtrado. A tabela é atualizada sem recarregar a página e a URL acompanha, então voltar e compartilhar o link funcionam; sem JavaScript, tudo funciona com recarga. |
+| **Configurações** (admin) | Tudo pelo navegador, sem editar arquivos. **Geral:** nome do sistema, empresa, endereço oficial (`app_url`), tamanho e cota de anexos, indexação por buscadores (desligada por padrão: `noindex` e `robots.txt` bloqueando tudo). **Aparência:** logotipo, favicon e as cores do menu, do destaque e dos botões; a cor do texto é escolhida automaticamente pelo contraste. **E-mail:** SMTP, com botão de e-mail de teste. **Turnstile:** chaves e formulários. **Segurança:** proxy/CDN e limites de requisição. **Sistema:** versão, extensões, último cron, fila de e-mails e o botão **Atualizar banco de dados**, que aplica as migrações sem terminal. Os valores salvos aqui se sobrepõem aos do `config.php`; banco, `debug` e `cron_token` continuam só no arquivo. |
 | **Cadastros** | Localizações (em árvore), categorias, fornecedores, técnicos (internos ou terceirizados, com custo/hora), especialidades e usuários. |
 
 ### Perfis de acesso
@@ -77,6 +78,17 @@ Para testar localmente: `php -S localhost:8080 -t public`
 6. Recarregue o PHP-FPM/Apache para limpar o opcache (`sudo systemctl reload php8.3-fpm`) e apague `storage/MANUTENCAO`.
 7. Os usuários precisarão entrar de novo.
 
+### Atualização sem terminal (hospedagem com painel)
+
+1. Faça backup do banco (painel → Backups ou phpMyAdmin → Exportar) e da pasta `storage/` (inclui `storage/app.key`, sem a qual as senhas salvas em Configurações não podem ser lidas).
+2. Envie o zip pelo gerenciador de arquivos e extraia por cima da instalação. O zip não traz `config/` nem `storage/`.
+3. Entre como administrador em **Configurações › Sistema** e clique em **Atualizar banco de dados**. A ação pede sua senha e roda com trava, então um duplo clique não aplica nada duas vezes.
+
+**Arquivos de emergência.** Crie-os vazios em `storage/` pelo gerenciador de arquivos e apague-os depois de corrigir o problema:
+- `DESATIVAR_TURNSTILE` desliga o Turnstile, se chaves erradas impedirem o login.
+- `DESATIVAR_RATE_LIMIT` desliga os limites de requisição.
+- `MANUTENCAO` mostra a página "Sistema em atualização".
+
 ### Tarefas agendadas (cron)
 
 Rode o cron com o mesmo usuário do PHP web (`sudo crontab -u www-data -e`):
@@ -89,7 +101,7 @@ Rode o cron com o mesmo usuário do PHP web (`sudo crontab -u www-data -e`):
 ```
 
 Se não houver cron por CLI, use a URL e mande o token no cabeçalho (assim ele não vai para o log de acesso):
-`curl -fsS -H "X-Cron-Token: SEU_TOKEN" https://seu-dominio/index.php?r=cron`. O botão **Gerar OTs vencidas**, na tela de planos, faz o mesmo sob demanda.
+`curl -fsS -H "X-Cron-Token: SEU_TOKEN" https://seu-dominio/index.php?r=cron` (o token não é mais aceito na URL). O botão **Gerar OTs vencidas**, na tela de planos, faz o mesmo sob demanda.
 
 Para o e-mail funcionar, preencha o bloco `email` e o `app_url`; sem `app_url` o envio fica desligado (os links sairiam do cabeçalho da requisição). A câmera do leitor de QR só funciona em **HTTPS**.
 
@@ -125,7 +137,28 @@ Para o e-mail funcionar, preencha o bloco `email` e o `app_url`; sem `app_url` o
   - o JSON é emitido com `JSON_HEX_*`;
   - as bibliotecas da CDN levam **SRI** (hash de integridade).
 - PDO com *prepared statements*; `X-Frame-Options`, `nosniff`, `Cross-Origin-Opener-Policy`, `Permissions-Policy` e HSTS em HTTPS.
-- **Rate limit e Turnstile:** ver a seção acima. Força bruta no login é bloqueada em três níveis:
+- **Configurações pelo painel:**
+  - só para o perfil admin;
+  - as abas Geral, E-mail, Turnstile e Segurança e a atualização do banco pedem a senha de novo (vale por 15 minutos);
+  - a senha SMTP e a chave secreta do Turnstile são gravadas cifradas (AES-256-GCM, chave em `storage/app.key`, fora do git) e nunca voltam para a tela, para o log ou para as mensagens de erro do SMTP;
+  - o Turnstile só pode ser ativado depois que o próprio admin passa no desafio com as chaves salvas, o que evita se trancar para fora;
+  - os limites de requisição têm piso mínimo;
+  - proxies confiáveis precisam ser faixas de /8 ou menores;
+  - logo e favicon são validados pelo conteúdo e regravados como PNG (sem SVG nem metadados).
+- **Rate limit e Turnstile:** ver a seção acima.
+  - IPv6 é contado por prefixo /64.
+  - Rotas inexistentes e clientes acima do limite não criam sessão.
+  - Cada estouro de limite é auditado uma vez por janela.
+  - O login leva o mesmo tempo para e-mails existentes e inexistentes.
+  - O bloqueio por e-mail não tranca o dono da conta quando ele entra de um IP já usado com sucesso.
+- **Sessões e cache:**
+  - as sessões ficam em `storage/sessions` (pasta própria, fora do diretório compartilhado do PHP);
+  - as páginas logadas saem com `Cache-Control: no-store`;
+  - acessos por HTTP são redirecionados para o `app_url` em HTTPS.
+- **Anexos:**
+  - fora imagens, são baixados como `application/octet-stream`, com o nome do arquivo sanitizado;
+  - há uma cota total de espaço (`upload_cota_mb`).
+- **Cron por URL:** o token só é aceito no cabeçalho `X-Cron-Token`. Força bruta no login é bloqueada em três níveis:
   - 8 falhas no mesmo e-mail e IP;
   - 50 falhas no mesmo IP;
   - 40 falhas no mesmo e-mail, de vários IPs.
@@ -175,6 +208,7 @@ app/
   auth.php        sessão, login, matriz de permissões
   seguranca.php   IP real (proxy/Cloudflare), rate limit, Turnstile, CSP/nonce/SRI
   tabela.php      tabelas server-side (busca, ordenação, paginação, CSV, AJAX)
+  configuracoes.php configurações pelo painel (validação, segredos cifrados, marca, tema)
   preventiva.php  motor de preventivas (geração, reprogramação, projeção)
   estoque.php     movimentação com custo médio
   kpi.php         cálculo de indicadores
@@ -185,7 +219,7 @@ app/
 config/           config.sample.php
 cron/             gerar_preventivas.php, enviar_emails.php
 database/         schema.sql, migracoes/*.sql, demo.php
-public/           index.php, q.php (link do QR), manifest.php, sw.js, assets/
+public/           index.php, q.php (link do QR), marca.php (logo/favicon/tema), robots.php, manifest.php, sw.js, assets/
 storage/uploads/  anexos (fora da raiz pública)
 install.php, migrate.php
 ```

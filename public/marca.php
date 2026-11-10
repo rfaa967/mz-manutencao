@@ -2,18 +2,19 @@
 // Logo, favicon e CSS do tema (configurados em Configurações › Aparência). Público: usados também na tela de login.
 declare(strict_types=1);
 require dirname(__DIR__) . '/app/bootstrap.php';
+limitar_cfg('geral_ip', ip_chave());
 
 header('X-Content-Type-Options: nosniff');
 header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox");
 header('Cross-Origin-Resource-Policy: same-origin');
 $t = is_string($_GET['t'] ?? null) ? $_GET['t'] : '';
-$versionado = isset($_GET['v']);
-$cache = fn() => header($versionado ? 'Cache-Control: public, max-age=31536000, immutable' : 'Cache-Control: public, max-age=300');
+// cache longo só quando a versão pedida é a atual (senão alguém envenenaria o cache de uma CDN com uma versão futura)
+$cache = fn(string $atual) => header((string)($_GET['v'] ?? '') === $atual ? 'Cache-Control: public, max-age=31536000, immutable' : 'Cache-Control: public, max-age=300');
 
 if ($t === 'css') {
     $css = tema_css() ?? '';
     header('Content-Type: text/css; charset=utf-8');
-    $cache();
+    $cache((string)tema_versao());
     exit($css);
 }
 if ($t === 'logo' || $t === 'favicon') {
@@ -26,7 +27,7 @@ if ($t === 'logo' || $t === 'favicon') {
     }
     header('Content-Type: ' . $mime);
     header('Content-Length: ' . filesize($arq));
-    $cache();
+    $cache((string)(int)($m['v'] ?? 0));
     readfile($arq);
     exit;
 }
