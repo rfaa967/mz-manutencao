@@ -158,7 +158,8 @@ Para o e-mail funcionar, preencha o bloco `email` e o `app_url`; sem `app_url` o
 - **Anexos:**
   - fora imagens, são baixados como `application/octet-stream`, com o nome do arquivo sanitizado;
   - há uma cota total de espaço (`upload_cota_mb`).
-- **Cron por URL:** o token só é aceito no cabeçalho `X-Cron-Token`. Força bruta no login é bloqueada em três níveis:
+- **Cron por URL:** o token só é aceito no cabeçalho `X-Cron-Token`.
+- **Força bruta no login** é bloqueada em três níveis:
   - 8 falhas no mesmo e-mail e IP;
   - 50 falhas no mesmo IP;
   - 40 falhas no mesmo e-mail, de vários IPs.
