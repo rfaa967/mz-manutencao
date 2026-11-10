@@ -135,13 +135,10 @@ function turnstile_widget(string $formulario, bool $forcar = false): string
     return '<div class="cf-turnstile mb-3" data-sitekey="' . e(cfg('turnstile.site_key')) . '" data-language="pt-br" data-action="' . e($formulario) . '"></div>';
 }
 
-/** Valida o token enviado pelo widget. Retorna null se ok, ou a mensagem de erro. */
-function turnstile_validar(string $formulario): ?string
+/** Consulta o siteverify da Cloudflare. Retorna a resposta decodificada ou null se a Cloudflare não respondeu. */
+function turnstile_siteverify(string $secret, string $token): ?array
 {
-    if (!turnstile_exigido($formulario)) return null;
-    $token = $_POST['cf-turnstile-response'] ?? '';
-    if (!is_string($token) || $token === '' || strlen($token) > 2048) return 'Confirme que você não é um robô.';
-    $dados = http_build_query(['secret' => cfg('turnstile.secret_key'), 'response' => $token, 'remoteip' => ip_cliente(), 'idempotency_key' => bin2hex(random_bytes(16))]);
+    $dados = http_build_query(['secret' => $secret, 'response' => $token, 'remoteip' => ip_cliente(), 'idempotency_key' => bin2hex(random_bytes(16))]);
     $ctx = stream_context_create(['http' => [
         'method' => 'POST', 'timeout' => 8, 'ignore_errors' => true,
         'header' => "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " . strlen($dados) . "\r\n",
@@ -149,7 +146,17 @@ function turnstile_validar(string $formulario): ?string
     ]]);
     $resp = @file_get_contents('https://challenges.cloudflare.com/turnstile/v0/siteverify', false, $ctx);
     $j = $resp !== false ? json_decode($resp, true) : null;
-    if (!is_array($j)) {
+    return is_array($j) ? $j : null;
+}
+
+/** Valida o token enviado pelo widget. Retorna null se ok, ou a mensagem de erro. */
+function turnstile_validar(string $formulario): ?string
+{
+    if (!turnstile_exigido($formulario)) return null;
+    $token = $_POST['cf-turnstile-response'] ?? '';
+    if (!is_string($token) || $token === '' || strlen($token) > 2048) return 'Confirme que você não é um robô.';
+    $j = turnstile_siteverify((string)cfg('turnstile.secret_key'), $token);
+    if ($j === null) {
         error_log('[MZManut] Turnstile sem resposta da Cloudflare');
         return cfg('turnstile.falhar_aberto', false) ? null : 'Não foi possível validar a verificação de segurança agora. Tente novamente em instantes.';
     }
@@ -172,9 +179,9 @@ function csp_nonce(): string
     return $n ??= base64_encode(random_bytes(18));
 }
 
-function csp_politica(): string
+function csp_politica(bool $turnstile = false): string
 {
-    $ts = cfg('turnstile.ativo', false) ? ' https://challenges.cloudflare.com' : '';
+    $ts = ($turnstile || cfg('turnstile.ativo', false)) ? ' https://challenges.cloudflare.com' : '';
     return implode('; ', [
         "default-src 'self'",
         // 'strict-dynamic': navegadores atuais só executam scripts com o nonce (e os carregados por eles);

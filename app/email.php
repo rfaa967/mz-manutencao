@@ -171,7 +171,7 @@ function email_layout(string $titulo, string $conteudo, ?string $link = null, st
     return '<!doctype html><html><body style="margin:0;background:#f3f5f8;font-family:Arial,Helvetica,sans-serif;color:#212529">'
         . '<table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:24px">'
         . '<table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#fff;border-radius:8px;overflow:hidden">'
-        . '<tr><td style="background:#212529;color:#ffc107;padding:16px 24px;font-weight:bold;font-size:18px">' . e(cfg('app_nome')) . ' <span style="color:#adb5bd;font-weight:normal;font-size:13px">· ' . e(cfg('empresa')) . '</span></td></tr>'
+        . '<tr><td style="background:' . e((string)cfg('tema.cor_menu', '#212529')) . ';color:' . e((string)cfg('tema.cor_destaque', '#ffc107')) . ';padding:16px 24px;font-weight:bold;font-size:18px">' . e(cfg('app_nome')) . ' <span style="color:#adb5bd;font-weight:normal;font-size:13px">· ' . e(cfg('empresa')) . '</span></td></tr>'
         . '<tr><td style="padding:24px"><h1 style="font-size:20px;margin:0 0 16px">' . e($titulo) . '</h1>' . $conteudo . $btn . '</td></tr>'
         . '<tr><td style="padding:12px 24px;background:#f8f9fa;color:#6c757d;font-size:12px">Mensagem automática. Para deixar de receber, desmarque "Receber notificações por e-mail" em Minha conta.</td></tr>'
         . '</table></td></tr></table></body></html>';

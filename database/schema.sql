@@ -11,8 +11,10 @@ DROP TABLE IF EXISTS auditoria, movimentos_estoque, ot_materiais, ot_mao_obra, o
 SET FOREIGN_KEY_CHECKS = 1;
 
 CREATE TABLE configuracoes (
-  chave VARCHAR(60) PRIMARY KEY,
-  valor TEXT
+  chave VARCHAR(64) NOT NULL PRIMARY KEY,
+  valor TEXT,
+  usuario_id INT NULL,
+  atualizado_em DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE localizacoes (

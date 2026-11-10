@@ -53,7 +53,7 @@ function flash(?string $msg = null, string $tipo = 'success')
         $_SESSION['flash'][] = [$tipo, $msg];
         // erro em formulário: guarda o que foi digitado para reexibir (exceto senhas e token)
         if (in_array($tipo, ['danger', 'warning'], true) && is_post()) {
-            $_SESSION['old'] = array_filter($_POST, fn($v, $k) => is_scalar($v) && !in_array($k, ['_csrf', 'senha', 'senha_atual', 'senha_nova', 'senha_conf'], true), ARRAY_FILTER_USE_BOTH);
+            $_SESSION['old'] = array_filter($_POST, fn($v, $k) => is_scalar($v) && $k !== '_csrf' && !preg_match('/senha|secret|token|password/i', (string)$k), ARRAY_FILTER_USE_BOTH);
         }
         return null;
     }

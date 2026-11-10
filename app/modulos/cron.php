@@ -6,6 +6,7 @@ $enviado = $_SERVER['HTTP_X_CRON_TOKEN'] ?? ($_GET['token'] ?? '');
 if ($token !== '' && strlen($token) < 24) error_log('[MZManut] cron_token com menos de 24 caracteres: chamadas por URL estão bloqueadas. Gere um novo com: php -r "echo bin2hex(random_bytes(32));"');
 if ($token === '' || strlen($token) < 24 || !is_string($enviado) || !hash_equals($token, $enviado)) { http_response_code(403); exit('forbidden'); }
 $g = gerar_preventivas();
+@touch(APP_ROOT . '/storage/cron_preventivas.ok');
 if (get('resumo', '1') === '1') enviar_resumo_diario($g);
 email_processar_fila(100);
 header('Content-Type: text/plain; charset=utf-8');

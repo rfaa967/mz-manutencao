@@ -14,6 +14,7 @@ header('Permissions-Policy: camera=(self), microphone=(), geolocation=(), paymen
 // Sem 'unsafe-inline' para scripts e sem atributos on* (script-src-attr 'none'): um XSS injetado não executa.
 header('Content-Security-Policy: ' . csp_politica());
 if (https_ativo()) header('Strict-Transport-Security: max-age=31536000');
+if (!cfg('seo.indexar')) header('X-Robots-Tag: noindex, nofollow');
 
 // Modo manutenção (durante atualizações): crie o arquivo storage/MANUTENCAO; apague ao terminar.
 if (is_file(APP_ROOT . '/storage/MANUTENCAO')) {
@@ -39,7 +40,7 @@ $modulo = preg_replace('/[^a-z_]/', '', $modulo);
 $acao   = preg_replace('/[^a-z_]/', '', $acao) ?: 'index';
 
 $modulos = ['login', 'logout', 'dashboard', 'ativos', 'cadastros', 'pedidos', 'ots', 'planos', 'contadores',
-            'estoque', 'calendario', 'relatorios', 'usuarios', 'perfil', 'cron', 'm'];
+            'estoque', 'calendario', 'relatorios', 'usuarios', 'perfil', 'cron', 'm', 'configuracoes'];
 
 if (!in_array($modulo, $modulos, true)) { http_response_code(404); exit('Página não encontrada'); }
 

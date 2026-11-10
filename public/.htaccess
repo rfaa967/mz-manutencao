@@ -4,3 +4,8 @@ Options -Indexes
         Require all denied
     </IfModule>
 </FilesMatch>
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^robots\.txt$ robots.php [L]
+</IfModule>

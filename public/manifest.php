@@ -9,7 +9,7 @@ echo json_encode([
     'scope' => $base . '/',
     'display' => 'standalone',
     'background_color' => '#f1f3f5',
-    'theme_color' => '#212529',
+    'theme_color' => (string)cfg('tema.cor_menu', '#212529'),
     'lang' => 'pt-BR',
     'icons' => [
         ['src' => $base . '/assets/icone-192.png', 'sizes' => '192x192', 'type' => 'image/png'],
