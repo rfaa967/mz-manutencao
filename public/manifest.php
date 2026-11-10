@@ -1,5 +1,6 @@
 <?php
 require dirname(__DIR__) . '/app/bootstrap.php';
+limitar_cfg('geral_ip', ip_chave());
 $base = rtrim((string)cfg('base_url', ''), '/');
 header('Content-Type: application/manifest+json; charset=utf-8');
 echo json_encode([

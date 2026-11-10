@@ -14,6 +14,7 @@ const CONFIG_CAMPOS = [
     'empresa'                  => ['str', 120],
     'app_url'                  => ['origem'],
     'upload_max_mb'            => ['int', 1, 64],
+    'upload_cota_mb'           => ['int', 100, 1000000],
     'seo.indexar'              => ['bool'],
     // aparência
     'tema.cor_menu'            => ['cor'],
@@ -44,18 +45,18 @@ const CONFIG_CAMPOS = [
     'proxy'                    => ['enum', ['', 'cloudflare', 'confiavel']],
     'proxies_confiaveis'       => ['cidrs'],
     'rate_limit.ativo'         => ['bool'],
-    'rate_limit.geral_ip'      => ['int', 0, 100000],
-    'rate_limit.post_usuario'  => ['int', 0, 100000],
-    'rate_limit.login_ip'      => ['int', 0, 100000],
-    'rate_limit.pedidos_hora'  => ['int', 0, 100000],
-    'rate_limit.uploads_hora'  => ['int', 0, 100000],
-    'rate_limit.qr_ip'         => ['int', 0, 100000],
-    'rate_limit.cron_ip'       => ['int', 0, 100000],
+    'rate_limit.geral_ip'      => ['limite', 60],
+    'rate_limit.post_usuario'  => ['limite', 20],
+    'rate_limit.login_ip'      => ['limite', 5],
+    'rate_limit.pedidos_hora'  => ['limite', 5],
+    'rate_limit.uploads_hora'  => ['limite', 5],
+    'rate_limit.qr_ip'         => ['limite', 10],
+    'rate_limit.cron_ip'       => ['limite', 1],
 ];
 
 /** Padrões das chaves que não existem no config.sample.php. */
 const CONFIG_PADROES = [
-    'seo.indexar' => false,
+    'seo.indexar' => false, 'upload_cota_mb' => 5120,
     'tema.cor_menu' => '#212529', 'tema.cor_destaque' => '#ffc107', 'tema.cor_primaria' => '#0d6efd',
     'marca.logo' => null, 'marca.favicon' => null,
 ];
@@ -84,11 +85,22 @@ function config_db_aplicar(): void
         $tipo = CONFIG_CAMPOS[$l['chave']][0] ?? null;
         if ($tipo === null) continue;
         $v = json_decode((string)$l['valor'], true);
-        if ($tipo === 'segredo') $v = is_string($v) ? config_decifrar($v) : '';
+        if (json_last_error() !== JSON_ERROR_NONE) continue;   // linha antiga/estranha: mantém o valor do config.php
+        if ($tipo === 'segredo') {
+            $cifrado = is_string($v) ? $v : '';
+            $v = config_decifrar($cifrado);
+            if ($cifrado !== '' && $v === '') $GLOBALS['__cfg_segredo_ilegivel'][] = $l['chave'];
+        }
         cfg_definir($l['chave'], $v);
     }
     // saída de emergência: criar o arquivo storage/DESATIVAR_TURNSTILE (pelo gerenciador de arquivos) desliga o Turnstile
     if (is_file(APP_ROOT . '/storage/DESATIVAR_TURNSTILE')) cfg_definir('turnstile.ativo', false);
+    // idem para o rate limit (se um limite mal configurado travar todo mundo com HTTP 429)
+    if (is_file(APP_ROOT . '/storage/DESATIVAR_RATE_LIMIT')) cfg_definir('rate_limit.ativo', false);
+    // segredo ilegível (storage/app.key perdido ou trocado): registra; a tela de Configurações avisa o administrador
+    if (cfg('turnstile.ativo') && in_array('turnstile.secret_key', $GLOBALS['__cfg_segredo_ilegivel'] ?? [], true)) {
+        error_log('[MZManut] chave secreta do Turnstile ilegível (storage/app.key mudou?) — redigite-a em Configurações');
+    }
 }
 
 /* ---------- segredos ---------- */
@@ -148,6 +160,9 @@ function config_validar(string $chave, $bruto)
             if (preg_match('/[\x00-\x1F\x7F]/u', $s) || !mb_check_encoding($s, 'UTF-8')) throw new InvalidArgumentException('Caracteres inválidos.');
             if (mb_strlen($s) > $def[1]) throw new InvalidArgumentException("Máximo de {$def[1]} caracteres.");
             return $s;
+        case 'limite':   // 0 desliga a regra; acima disso, um piso para o administrador não se trancar para fora
+            if (!preg_match('/^\d{1,6}$/', $s) || ((int)$s !== 0 && ((int)$s < $def[1] || (int)$s > 100000))) throw new InvalidArgumentException("Use 0 (desliga) ou um valor entre {$def[1]} e 100000.");
+            return (int)$s;
         case 'int':
             if (!preg_match('/^\d{1,9}$/', $s) || (int)$s < $def[1] || (int)$s > $def[2]) throw new InvalidArgumentException("Informe um número entre {$def[1]} e {$def[2]}.");
             return (int)$s;
@@ -188,6 +203,8 @@ function config_validar(string $chave, $bruto)
                 $v6 = filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6) !== false;
                 if (!filter_var($ip, FILTER_VALIDATE_IP) || ($bits !== null && (!ctype_digit($bits) || (int)$bits > ($v6 ? 128 : 32))))
                     throw new InvalidArgumentException("Faixa inválida: $c");
+                // faixas enormes (ex.: 0.0.0.0/0) fariam o sistema confiar no X-Forwarded-For de qualquer um
+                if ($bits !== null && (int)$bits < ($v6 ? 16 : 8)) throw new InvalidArgumentException("Faixa ampla demais: $c (mínimo /8 em IPv4 e /16 em IPv6).");
             }
             return $itens;
         case 'segredo':
@@ -294,7 +311,8 @@ function marca_salvar_upload(array $f, string $tipo): array
     $info = @getimagesize((string)$f['tmp_name']);
     $mimes = [IMAGETYPE_PNG => 'image/png', IMAGETYPE_JPEG => 'image/jpeg', IMAGETYPE_WEBP => 'image/webp'];
     if (!$info || !isset($mimes[$info[2]])) throw new InvalidArgumentException('Envie uma imagem PNG, JPG ou WEBP.');
-    if ($info[0] < 16 || $info[1] < 16 || $info[0] > 4000 || $info[1] > 4000) throw new InvalidArgumentException('Dimensões inválidas (16 a 4000 px).');
+    if ($info[0] < 16 || $info[1] < 16 || $info[0] > 4000 || $info[1] > 4000 || $info[0] * $info[1] > 12_000_000)
+        throw new InvalidArgumentException('Dimensões inválidas (16 a 4000 px, até 12 megapixels).');
     if (!is_dir(MARCA_DIR) && !mkdir(MARCA_DIR, 0770, true)) throw new RuntimeException('Não foi possível criar storage/marca.');
 
     $max = $tipo === 'favicon' ? [256, 256] : [800, 240];
@@ -309,8 +327,9 @@ function marca_salvar_upload(array $f, string $tipo): array
         imagealphablending($novo, false); imagesavealpha($novo, true);
         imagefill($novo, 0, 0, imagecolorallocatealpha($novo, 0, 0, 0, 127));
         imagecopyresampled($novo, $img, 0, 0, 0, 0, $nw, $nh, $w, $h);
-        $tmp = $destino . '.tmp';
-        if (!imagepng($novo, $tmp, 9)) throw new RuntimeException('Não foi possível gravar a imagem.');
+        $tmp = tempnam(MARCA_DIR, 'up');
+        if ($tmp === false || !imagepng($novo, $tmp, 9)) { if ($tmp) @unlink($tmp); throw new RuntimeException('Não foi possível gravar a imagem.'); }
+        imagedestroy($img); imagedestroy($novo);
         rename($tmp, $destino);
         $mime = 'image/png';
     } else {
@@ -321,7 +340,7 @@ function marca_salvar_upload(array $f, string $tipo): array
         $mime = $mimes[$info[2]];
     }
     @chmod($destino, 0640);
-    foreach (glob(MARCA_DIR . "/$tipo.*") ?: [] as $velho) if ($velho !== $destino && !str_ends_with($velho, '.tmp')) @unlink($velho);
+    foreach (glob(MARCA_DIR . "/$tipo.*") ?: [] as $velho) if ($velho !== $destino) @unlink($velho);
     return ['arq' => basename($destino), 'mime' => $mime, 'v' => time()];
 }
 

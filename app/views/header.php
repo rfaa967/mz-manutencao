@@ -72,6 +72,7 @@ $cad = [
     </div>
   </aside>
   <main class="flex-grow-1 p-3 p-lg-4 conteudo">
+    <?php if ($u['perfil'] === 'admin' && !empty($GLOBALS['__cfg_segredo_ilegivel']) && ($GLOBALS['__menu'] ?? '') !== 'configuracoes'): ?><div class="alert alert-danger py-2 small no-print"><i class="bi bi-exclamation-octagon"></i> Algumas senhas/chaves salvas não puderam ser lidas (storage/app.key mudou). <a href="<?= e(url('configuracoes')) ?>">Ver em Configurações</a></div><?php endif; ?>
     <?php if (in_array($u['perfil'], ['tecnico', 'solicitante'], true)): ?><a href="<?= e(url('m')) ?>" class="alert alert-warning d-block d-md-none py-2 small text-decoration-none no-print"><i class="bi bi-phone"></i> Está no celular? Abra a <strong>versão mobile</strong>, com leitor de QR Code.</a><?php endif; ?>
 <?php else: ?>
 <main class="container py-5">

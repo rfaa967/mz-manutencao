@@ -3,7 +3,7 @@ if (usuario()) redirect('dashboard');
 
 $erro = '';
 if (is_post()) {
-    limitar_cfg('login_ip', ip_cliente());
+    limitar_cfg('login_ip', ip_chave());
     $erro = turnstile_validar('login') ?? login((string)post('email'), (string)post('senha'));
     if ($erro === null) {
         $dest = $_SESSION['destino'] ?? null; unset($_SESSION['destino']);

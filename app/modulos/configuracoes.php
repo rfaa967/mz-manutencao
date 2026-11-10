@@ -11,7 +11,7 @@ const CONFIG_ABAS = [
     'sistema'   => ['Sistema', 'cpu'],
 ];
 /** Abas cujas alterações exigem reconfirmar a senha (vale por 15 min). */
-const CONFIG_ABAS_SENSIVEIS = ['email', 'turnstile', 'seguranca'];
+const CONFIG_ABAS_SENSIVEIS = ['geral', 'email', 'turnstile', 'seguranca'];   // geral: app_url define os links de e-mails e etiquetas
 const REAUTH_SEG = 900;
 
 $aba = is_string(get('aba')) && isset(CONFIG_ABAS[get('aba')]) ? get('aba') : 'geral';
@@ -37,6 +37,7 @@ function config_reautenticar(): ?string
 /* ===================== ações ===================== */
 
 if (is_post() && $acao === 'migrar') {
+    if ($erro = config_reautenticar()) { flash($erro, 'danger'); $voltar('sistema'); }
     try {
         $feitas = aplicar_migracoes();
         auditar('migracoes', 'sistema', null, implode(',', $feitas));
@@ -79,7 +80,7 @@ if (is_post() && $acao === 'salvar') {
     if (in_array($sec, CONFIG_ABAS_SENSIVEIS, true) && ($erro = config_reautenticar())) { flash($erro, 'danger'); $voltar($sec); }
 
     $campos = [
-        'geral'     => ['app_nome', 'empresa', 'app_url', 'upload_max_mb', 'seo.indexar'],
+        'geral'     => ['app_nome', 'empresa', 'app_url', 'upload_max_mb', 'upload_cota_mb', 'seo.indexar'],
         'aparencia' => ['tema.cor_menu', 'tema.cor_destaque', 'tema.cor_primaria'],
         'email'     => ['email.ativo', 'email.envio_imediato', 'email.remetente', 'email.remetente_nome', 'email.transporte', 'email.smtp_host',
                         'email.smtp_porta', 'email.smtp_seguranca', 'email.smtp_usuario', 'email.smtp_senha', 'email.resumo_diario'],
@@ -170,13 +171,15 @@ if (is_post() && $acao === 'salvar') {
 function rotulo_config(string $k): string
 {
     return [
-        'app_nome' => 'Nome do sistema', 'empresa' => 'Empresa', 'app_url' => 'Endereço do sistema', 'upload_max_mb' => 'Tamanho máximo de anexo',
+        'app_nome' => 'Nome do sistema', 'empresa' => 'Empresa', 'app_url' => 'Endereço do sistema', 'upload_max_mb' => 'Tamanho máximo de anexo', 'upload_cota_mb' => 'Espaço total para anexos (MB)',
         'tema.cor_menu' => 'Cor do menu', 'tema.cor_destaque' => 'Cor de destaque', 'tema.cor_primaria' => 'Cor primária',
         'email.remetente' => 'Remetente', 'email.remetente_nome' => 'Nome do remetente', 'email.smtp_host' => 'Servidor SMTP',
         'email.smtp_porta' => 'Porta', 'email.smtp_usuario' => 'Usuário SMTP', 'email.smtp_senha' => 'Senha SMTP',
         'turnstile.site_key' => 'Site key', 'turnstile.secret_key' => 'Secret key', 'proxies_confiaveis' => 'Proxies confiáveis',
         'turnstile.modo_login' => 'Modo no login', 'email.transporte' => 'Transporte', 'email.smtp_seguranca' => 'Segurança da conexão', 'proxy' => 'Proxy / CDN',
-    ][$k] ?? (str_starts_with($k, 'rate_limit.') ? 'Limite ' . substr($k, 11) : $k);
+        'rate_limit.geral_ip' => 'Páginas por IP', 'rate_limit.post_usuario' => 'Envios por usuário', 'rate_limit.login_ip' => 'Logins por IP',
+        'rate_limit.pedidos_hora' => 'Pedidos por hora', 'rate_limit.uploads_hora' => 'Anexos por hora', 'rate_limit.qr_ip' => 'Leituras de QR por IP', 'rate_limit.cron_ip' => 'Cron por IP',
+    ][$k] ?? $k;
 }
 
 function ini_bytes(string $v): int
@@ -222,7 +225,7 @@ function cfg_segredo(string $k): string
 
 function cfg_reauth(string $aba): string
 {
-    if (!in_array($aba, CONFIG_ABAS_SENSIVEIS, true) || ($_SESSION['reauth_ate'] ?? 0) > time()) return '';
+    if ((!in_array($aba, CONFIG_ABAS_SENSIVEIS, true) && $aba !== 'migrar') || ($_SESSION['reauth_ate'] ?? 0) > time()) return '';
     return '<div class="col-md-6"><label class="form-label" for="senha_confirmacao">Sua senha atual <span class="text-danger">*</span></label>'
          . '<input type="password" class="form-control" id="senha_confirmacao" name="senha_confirmacao" required autocomplete="current-password">'
          . '<div class="form-text">Por segurança, confirme sua senha para alterar esta seção (vale por 15 minutos).</div></div>';
@@ -237,6 +240,8 @@ if ($aba === 'turnstile' && cfg('turnstile.site_key')) {
 view_header('Configurações', 'configuracoes');
 ?>
 <div class="page-title"><h1><i class="bi bi-gear"></i> Configurações</h1></div>
+<?php if ($ilegiveis = $GLOBALS['__cfg_segredo_ilegivel'] ?? []): ?><div class="alert alert-danger"><i class="bi bi-exclamation-octagon"></i> <strong>Não foi possível ler: <?= e(implode(', ', array_map('rotulo_config', $ilegiveis))) ?>.</strong>
+  A chave de criptografia (<code>storage/app.key</code>) foi perdida ou trocada. Digite essas senhas/chaves de novo nas abas correspondentes. <?php if (in_array('turnstile.secret_key', $ilegiveis, true)): ?>Enquanto isso o Turnstile <strong>não está sendo exigido</strong>.<?php endif; ?></div><?php endif; ?>
 <?php if (!$tabelaOk): ?><div class="alert alert-warning">O banco de dados precisa ser atualizado para salvar configurações. Abra a aba <a href="<?= e(url('configuracoes', ['aba' => 'sistema'])) ?>">Sistema</a> e clique em <strong>Atualizar banco de dados</strong>.</div><?php endif; ?>
 
 <ul class="nav nav-tabs mb-3">
@@ -256,6 +261,7 @@ view_header('Configurações', 'configuracoes');
     <div class="col-md-6"><?= cfg_campo('empresa', 'text', '', 'maxlength="120" required') ?></div>
     <div class="col-md-6"><?= cfg_campo('app_url', 'url', 'Protocolo e domínio, sem barra no final. Usado nos links dos e-mails e nas etiquetas QR.', 'placeholder="https://manutencao.empresa.com.br"') ?></div>
     <div class="col-md-3"><?= cfg_campo('upload_max_mb', 'number', 'Limite do PHP: ' . e(ini_get('upload_max_filesize')) . ' / ' . e(ini_get('post_max_size')), 'min="1" max="64" required') ?></div>
+    <div class="col-md-3"><?= cfg_campo('upload_cota_mb', 'number', 'Em uso: ' . e(num((int)qv('SELECT COALESCE(SUM(tamanho), 0) FROM ativo_documentos') / 1048576, 1)) . ' MB', 'min="100" max="1000000" required') ?></div>
     <div class="col-12"><?= cfg_check('seo.indexar', 'Permitir indexação por buscadores (Google, Bing…)', 'Desligado (recomendado para sistema interno): envia <code>noindex</code> em todas as páginas e o <code>robots.txt</code> bloqueia tudo. Ligado: só a tela de login pode aparecer nos buscadores — as demais páginas exigem login de qualquer forma.') ?></div>
 
 <?php elseif ($aba === 'aparencia'): ?>
@@ -342,7 +348,8 @@ view_header('Configurações', 'configuracoes');
       <div class="alert alert-warning py-2"><strong><?= count($pend) ?> atualização(ões) pendente(s):</strong> <?= e(implode(', ', $pend)) ?></div>
       <p class="small text-muted mb-2">Faça backup do banco antes (CyberPanel → Backups ou phpMyAdmin → Exportar).</p>
       <form method="post" action="<?= e(url('configuracoes/migrar')) ?>"><?= csrf_field() ?>
-        <button class="btn btn-warning" data-confirm="Aplicar as atualizações do banco de dados agora?"><i class="bi bi-database-up"></i> Atualizar banco de dados</button></form>
+        <div class="row g-2 align-items-end"><?= cfg_reauth('migrar') ?>
+        <div class="col-auto"><button class="btn btn-warning" data-confirm="Aplicar as atualizações do banco de dados agora?"><i class="bi bi-database-up"></i> Atualizar banco de dados</button></div></div></form>
     <?php else: ?>
       <p class="text-success mb-0"><i class="bi bi-check-circle"></i> Banco atualizado (<?= count($feitas) ?> migrações aplicadas).</p>
     <?php endif; ?>

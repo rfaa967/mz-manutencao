@@ -20,6 +20,7 @@ return [
     // Pasta fora da raiz pública para anexos
     'upload_dir'      => __DIR__ . '/../storage/uploads',
     'upload_max_mb'   => 15,
+    'upload_cota_mb'  => 5120,     // espaço total para anexos (MB)
     'upload_extensoes'=> ['pdf','jpg','jpeg','png','webp','doc','docx','xls','xlsx','txt','dwg','zip'],
 
     // Token para chamar o gerador de preventivas via URL (cron por wget/curl). Vazio = desabilitado.

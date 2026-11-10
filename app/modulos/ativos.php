@@ -79,6 +79,8 @@ if ($acao === 'upload' && is_post()) {
     elseif (!$f || !is_array($f) || !is_string($f['name'] ?? null) || $f['error'] !== UPLOAD_ERR_OK) flash('Falha no envio do arquivo.', 'danger');
     elseif ($f['size'] > cfg('upload_max_mb', 15) * 1048576) flash('Arquivo maior que o limite.', 'danger');
     elseif (!in_array($ext, cfg('upload_extensoes', []), true)) flash('Tipo de arquivo não permitido.', 'danger');
+    elseif ((int)qv('SELECT COALESCE(SUM(tamanho), 0) FROM ativo_documentos') + $f['size'] > (int)cfg('upload_cota_mb', 5120) * 1048576)
+        flash('O espaço reservado para anexos (' . (int)cfg('upload_cota_mb', 5120) . ' MB) acabou. Exclua documentos antigos ou peça ao administrador para aumentar a cota.', 'danger');
     else {
         $dir = cfg('upload_dir');
         if (!is_dir($dir)) mkdir($dir, 0775, true);
@@ -99,9 +101,12 @@ if ($acao === 'download') {
     $mime = (new finfo(FILEINFO_MIME_TYPE))->file($path) ?: 'application/octet-stream';
     $inline = in_array($mime, ['image/jpeg', 'image/png', 'image/webp'], true); // PDFs e demais: sempre download
     header("Content-Security-Policy: sandbox; default-src 'none'; img-src 'self'");
-    header('Content-Type: ' . $mime);
+    // fora imagens, o tipo é sempre genérico: um .txt com HTML nunca é interpretado pelo navegador
+    header('Content-Type: ' . ($inline ? $mime : 'application/octet-stream'));
     header('Content-Length: ' . filesize($path));
-    header('Content-Disposition: ' . ($inline ? 'inline' : 'attachment') . '; filename="' . str_replace('"', '', $d['nome_original']) . '"');
+    $nome = preg_replace('/[\x00-\x1F\x7F"\\\\\/]/u', '', (string)$d['nome_original']) ?: 'arquivo';
+    $ascii = preg_replace('/[^\x20-\x7E]/', '_', $nome);
+    header('Content-Disposition: ' . ($inline ? 'inline' : 'attachment') . '; filename="' . $ascii . '"; filename*=UTF-8\'\'' . rawurlencode($nome));
     readfile($path);
     exit;
 }
