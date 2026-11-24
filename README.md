@@ -21,6 +21,7 @@ PHP 8.1+ puro (sem framework), PDO/MySQL, Bootstrap 5, Chart.js e FullCalendar v
 | **Notificações por e-mail** | Avisam: novo pedido (para os gestores), pedido aprovado ou rejeitado (para o solicitante), OT atribuída (para o técnico), serviço concluído (para o solicitante) e o resumo diário (atrasadas, preventivas geradas, ativos parados, estoque baixo). Os envios passam por uma fila, com SMTP próprio (STARTTLS/SSL) ou `mail()`. Cada usuário pode desligar os e-mails em *Minha conta*. |
 | **Listagens** | Todas as listas (OTs, ativos, pedidos, estoque, planos, usuários, cadastros) são tabelas *server-side* no estilo DataTables: busca por vários termos em várias colunas, ordenação clicando no cabeçalho, paginação, itens por página (lembrados por usuário) e exportação CSV do resultado filtrado. A tabela é atualizada sem recarregar a página e a URL acompanha, então voltar e compartilhar o link funcionam; sem JavaScript, tudo funciona com recarga. |
 | **Configurações** (admin) | Tudo pelo navegador, sem editar arquivos. **Geral:** nome do sistema, empresa, endereço oficial (`app_url`), tamanho e cota de anexos, indexação por buscadores (desligada por padrão: `noindex` e `robots.txt` bloqueando tudo). **Aparência:** logotipo, favicon e as cores do menu, do destaque e dos botões; a cor do texto é escolhida automaticamente pelo contraste. **E-mail:** SMTP, com botão de e-mail de teste. **Turnstile:** chaves e formulários. **Segurança:** proxy/CDN e limites de requisição. **Sistema:** versão, extensões, último cron, fila de e-mails e o botão **Atualizar banco de dados**, que aplica as migrações sem terminal. Os valores salvos aqui se sobrepõem aos do `config.php`; banco, `debug` e `cron_token` continuam só no arquivo. |
+| **Importação do ManWinWin** (admin) | Em **Configurações › Importação**: envia o banco do ManWinWin (`.zip` gerado pelo exportador, ou o `.mdb` se o servidor tiver mdbtools), vê a simulação do que será criado e confirma. Traz localizações, fornecedores, tipos de equipamento, ativos, técnicos, fichas de manutenção (como planos, com checklist), OTs e pedidos; artigos e saldos são opcionais. Ignora os exemplos "Modelo" do ManWinWin. Pode ser repetida sem duplicar. |
 | **Cadastros** | Localizações (em árvore), categorias, fornecedores, técnicos (internos ou terceirizados, com custo/hora), especialidades e usuários. |
 
 ### Perfis de acesso
@@ -104,6 +105,34 @@ Se não houver cron por CLI, use a URL e mande o token no cabeçalho (assim ele 
 `curl -fsS -H "X-Cron-Token: SEU_TOKEN" https://seu-dominio/index.php?r=cron` (o token não é mais aceito na URL). O botão **Gerar OTs vencidas**, na tela de planos, faz o mesmo sob demanda.
 
 Para o e-mail funcionar, preencha o bloco `email` e o `app_url`; sem `app_url` o envio fica desligado (os links sairiam do cabeçalho da requisição). A câmera do leitor de QR só funciona em **HTTPS**.
+
+### Importação do ManWinWin
+
+1. Aplique a migração `010_importacao.sql` (`php migrate.php` ou **Configurações › Sistema › Atualizar banco de dados**) e faça backup do banco.
+2. Gere o `.zip` no computador onde está o ManWinWin:
+   - **Windows:** copie a pasta `tools/manwinwin` e arraste o `ManWinWin.mdb` sobre `exportar_manwinwin.bat`. O banco é aberto só para leitura; feche o ManWinWin antes. Se aparecer "nenhum driver do Access", instale o *Microsoft Access Database Engine 2016 Redistributable*. Banco com senha: `powershell -ExecutionPolicy Bypass -File exportar_manwinwin.ps1 -Mdb ManWinWin.mdb -Senha SENHA`.
+   - **Linux/macOS:** `tools/manwinwin/exportar_manwinwin.sh ManWinWin.mdb` (precisa de `mdbtools` e `zip`).
+3. Em **Configurações › Importação**, envie o `.zip`, confira a simulação e clique em **Importar agora**. Ou pelo terminal:
+   ```bash
+   php tools/importar_manwinwin.php manwinwin.zip --detalhes   # simulação, nada é gravado
+   php tools/importar_manwinwin.php manwinwin.zip --aplicar    # grava (--incluir-artigos, --incluir-modelo, --usuario=email)
+   ```
+
+Como os dados são convertidos:
+
+| ManWinWin | MZ Manutenção |
+|---|---|
+| `LocaisObj` (locais) | Localizações (com a hierarquia) |
+| `Forneced` | Fornecedores |
+| `TipObjeto` (só os tipos em uso) | Tipos de equipamento (categorias) |
+| `Objectos` | Ativos: marca, modelo, nº de série, data de entrada, valor (`InvmtoObj`), criticidade 1/2/3 → A/B/C, centro de custo, equipamento pai. O sistema e as demais características vão para a descrição. |
+| `Funcionario` | Técnicos (sem login; crie o usuário depois, se precisar) |
+| `Fichas` + programação em `Calibra` | Planos por tempo, com as tarefas no checklist. Periodicidade: dias/semanas/meses/anos. As fichas com OT programada entram **ativas**, com a próxima data do ManWinWin. As fichas sem programação entram **inativas**: defina a data e ative em *Planos*. |
+| `Calibra` emitidas, fechadas ou anuladas | OTs (aberta, concluída ou cancelada), ligadas ao plano. O número original fica na descrição. Relatório, mão de obra e materiais em texto vão para a solução; o custo total vai para o custo externo. |
+| `PTs` | Pedidos de trabalho, ligados à OT quando houver |
+| `MestreArtigos` + `Artigos` (opcional) | Artigos, com o saldo inicial lançado como ajuste no kardex |
+
+Não são importados os exemplos "Modelo" (centro de custo 9999, códigos `XX-0000`), o usuário DEMO, as tabelas de configuração do ManWinWin (contas, moedas, sistemas-modelo) nem usuários e senhas. Cada registro importado fica ligado ao código de origem na tabela `importacao_mapa`. Reimportar o mesmo banco cria só o que falta, não altera o que foi editado aqui e não recria o que foi excluído.
 
 ### Rate limit, Cloudflare e Turnstile
 

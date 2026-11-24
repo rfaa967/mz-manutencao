@@ -8,8 +8,11 @@ const CONFIG_ABAS = [
     'email'     => ['E-mail', 'envelope'],
     'turnstile' => ['Turnstile', 'shield-check'],
     'seguranca' => ['Segurança', 'shield-lock'],
+    'importar'  => ['Importação', 'box-arrow-in-down'],
     'sistema'   => ['Sistema', 'cpu'],
 ];
+/** Abas sem o formulário "Salvar" de configurações (têm formulários próprios). */
+const CONFIG_ABAS_SEM_FORM = ['importar', 'sistema'];
 /** Abas cujas alterações exigem reconfirmar a senha (vale por 15 min). */
 const CONFIG_ABAS_SENSIVEIS = ['geral', 'email', 'turnstile', 'seguranca'];   // geral: app_url define os links de e-mails e etiquetas
 const REAUTH_SEG = 900;
@@ -49,6 +52,59 @@ if (is_post() && $acao === 'migrar') {
     $voltar('sistema');
 }
 
+/* ---------- importação do ManWinWin (simulação → confirmação) ---------- */
+if (is_post() && in_array($acao, ['importar_analisar', 'importar_aplicar', 'importar_cancelar'], true)) {
+    require_once APP_ROOT . '/app/importacao_manwinwin.php';
+    $dirImp = APP_ROOT . '/storage/importacoes';
+    $descartar = function () use ($dirImp): void {
+        $arq = (string)($_SESSION['importacao']['arquivo'] ?? '');
+        if ($arq !== '' && is_file($arq) && str_starts_with((string)realpath($arq), (string)realpath($dirImp) . DIRECTORY_SEPARATOR)) @unlink($arq);
+        unset($_SESSION['importacao']);
+    };
+    if ($acao === 'importar_cancelar') { $descartar(); flash('Importação descartada; nada foi gravado.'); $voltar('importar'); }
+    if ($erro = config_reautenticar()) { flash($erro, 'danger'); $voltar('importar'); }
+    if (!qv("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'importacao_mapa'")) {
+        flash('Atualize o banco de dados (aba Sistema) antes de importar.', 'warning'); $voltar('sistema');
+    }
+    try {
+        if ($acao === 'importar_analisar') {
+            limitar('importacao', 'u' . usuario()['id'], 30, 3600);
+            $descartar();
+            $f = $_FILES['arquivo'] ?? null;
+            $errUp = is_array($f) ? (int)($f['error'] ?? UPLOAD_ERR_NO_FILE) : UPLOAD_ERR_NO_FILE;
+            if ($errUp === UPLOAD_ERR_INI_SIZE || $errUp === UPLOAD_ERR_FORM_SIZE) throw new RuntimeException('Arquivo maior que o limite do servidor (' . ini_get('upload_max_filesize') . '). Envie o .zip gerado pelo exportador, que é bem menor que o .mdb.');
+            if ($errUp !== UPLOAD_ERR_OK || !is_uploaded_file((string)$f['tmp_name'])) throw new RuntimeException('Selecione o arquivo exportado do ManWinWin (.zip ou .mdb).');
+            $ext = strtolower(pathinfo((string)$f['name'], PATHINFO_EXTENSION));
+            if (!in_array($ext, ['zip', 'mdb', 'accdb'], true)) throw new RuntimeException('Envie o .zip gerado pelo exportador ou o arquivo .mdb do ManWinWin.');
+            if (!is_dir($dirImp) && !@mkdir($dirImp, 0770, true)) throw new RuntimeException('Não foi possível criar storage/importacoes (verifique a permissão da pasta storage/).');
+            foreach (glob($dirImp . '/*') ?: [] as $velho) if (is_file($velho) && filemtime($velho) < time() - 86400) @unlink($velho);   // simulações esquecidas
+            $destino = $dirImp . '/' . bin2hex(random_bytes(16)) . '.' . $ext;
+            if (!move_uploaded_file((string)$f['tmp_name'], $destino)) throw new RuntimeException('Não foi possível salvar o arquivo enviado (verifique a permissão da pasta storage/).');
+            $opcoes = ['incluir_modelo' => (bool)post('incluir_modelo'), 'incluir_artigos' => (bool)post('incluir_artigos')];
+            $_SESSION['importacao'] = ['arquivo' => $destino, 'ext' => $ext, 'nome' => mb_substr(basename(str_replace('\\', '/', (string)$f['name'])), 0, 120),
+                                       'opcoes' => $opcoes, 'hash' => hash_file('sha256', $destino), 'em' => time()];
+            $rel = (new ImportadorManWinWin(mww_ler_arquivo($destino, "arquivo.$ext"), $opcoes, (int)usuario()['id']))->executar(false);
+            $_SESSION['importacao']['relatorio'] = $rel;
+        } else {
+            $s = $_SESSION['importacao'] ?? null;
+            if (!$s || !hash_equals((string)$s['hash'], (string)post('hash')) || !is_file((string)$s['arquivo']) || hash_file('sha256', (string)$s['arquivo']) !== $s['hash'] || time() - (int)$s['em'] > 7200) {
+                $descartar();
+                throw new RuntimeException('A simulação expirou ou o arquivo mudou. Envie o arquivo de novo.');
+            }
+            $rel = (new ImportadorManWinWin(mww_ler_arquivo((string)$s['arquivo'], 'arquivo.' . $s['ext']), (array)$s['opcoes'], (int)usuario()['id']))->executar(true);
+            auditar('importacao', 'manwinwin', null, $s['nome'] . ': ' . mww_resumo($rel));
+            $descartar();
+            $_SESSION['importacao_feita'] = ['nome' => $s['nome'], 'resumo' => mww_resumo($rel), 'inativos' => count($rel['planos_inativos'] ?? [])];
+            flash('Importação concluída: ' . mww_resumo($rel) . '.');
+        }
+    } catch (Throwable $ex) {
+        error_log('[MZManut] importação ManWinWin: ' . $ex);
+        if ($acao === 'importar_analisar') $descartar();
+        flash('Importação: ' . mb_substr($ex->getMessage(), 0, 400), 'danger');
+    }
+    $voltar('importar');
+}
+
 if (is_post() && !$tabelaOk) { flash('Atualize o banco de dados (aba Sistema) antes de alterar configurações.', 'warning'); $voltar('sistema'); }
 
 if (is_post() && $acao === 'email_teste') {
@@ -76,7 +132,7 @@ if (is_post() && $acao === 'remover_imagem') {
 
 if (is_post() && $acao === 'salvar') {
     $sec = (string)post('aba');
-    if (!isset(CONFIG_ABAS[$sec]) || $sec === 'sistema') { flash('Seção inválida.', 'danger'); $voltar(); }
+    if (!isset(CONFIG_ABAS[$sec]) || in_array($sec, CONFIG_ABAS_SEM_FORM, true)) { flash('Seção inválida.', 'danger'); $voltar(); }
     if (in_array($sec, CONFIG_ABAS_SENSIVEIS, true) && ($erro = config_reautenticar())) { flash($erro, 'danger'); $voltar($sec); }
 
     $campos = [
@@ -250,7 +306,7 @@ view_header('Configurações', 'configuracoes');
   <?php endforeach; ?>
 </ul>
 
-<?php if ($aba !== 'sistema'): ?>
+<?php if (!in_array($aba, CONFIG_ABAS_SEM_FORM, true)): ?>
 <form method="post" action="<?= e(url('configuracoes/salvar')) ?>" enctype="multipart/form-data" class="card"><div class="card-body">
   <?= csrf_field() ?><input type="hidden" name="aba" value="<?= e($aba) ?>">
   <div class="row g-3">
@@ -329,6 +385,92 @@ view_header('Configurações', 'configuracoes');
     <?php endforeach; ?>
     <div class="col-12 small text-muted">Bloqueio de login (fixo): 8 falhas por e-mail+IP, 50 por IP ou 40 por e-mail em 15 minutos.</div>
 
+<?php elseif ($aba === 'importar'):
+    require_once APP_ROOT . '/app/importacao_manwinwin.php';
+    $imp = $_SESSION['importacao'] ?? null;
+    $rel = $imp['relatorio'] ?? null;
+    $feita = $_SESSION['importacao_feita'] ?? null;
+    unset($_SESSION['importacao_feita']);
+    $mapaOk = (bool)qv("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'importacao_mapa'");
+?>
+<?php if (!$mapaOk): ?><div class="alert alert-warning">Atualize o banco de dados na aba <a href="<?= e(url('configuracoes', ['aba' => 'sistema'])) ?>">Sistema</a> antes de importar.</div><?php endif; ?>
+<?php if ($feita): ?>
+<div class="alert alert-success"><i class="bi bi-check-circle"></i> <strong><?= e($feita['nome']) ?></strong> importado: <?= e($feita['resumo']) ?>.
+  <?php if ($feita['inativos']): ?><br><?= (int)$feita['inativos'] ?> plano(s) ficaram <strong>inativos</strong> porque não tinham programação no ManWinWin: abra <a href="<?= e(url('planos')) ?>">Planos</a>, defina a próxima data e ative os que estiverem em uso.<?php endif; ?></div>
+<?php endif; ?>
+
+<?php if ($rel): ?>
+<div class="card mb-3 border-primary"><div class="card-body">
+  <h2 class="h6"><i class="bi bi-clipboard-check"></i> Simulação de <?= e($imp['nome']) ?> <span class="badge text-bg-secondary">nada foi gravado ainda</span></h2>
+  <div class="table-responsive"><table class="table table-sm w-auto mb-3">
+    <thead><tr><th></th><th class="text-end">Novos</th><th class="text-end">Já existentes</th></tr></thead><tbody>
+    <?php foreach (MWW_ROTULOS as $t => $r): $c = $rel['criados'][$t] ?? 0; $x = $rel['existentes'][$t] ?? 0; if (!$c && !$x) continue; ?>
+      <tr><td><?= e($r) ?></td><td class="text-end fw-semibold"><?= (int)$c ?></td><td class="text-end text-muted"><?= (int)$x ?></td></tr>
+    <?php endforeach; ?>
+    </tbody></table></div>
+  <?php if (!array_sum($rel['criados'])): ?><p class="text-muted">Tudo o que há neste arquivo já foi importado antes.</p><?php endif; ?>
+  <?php if (!empty($rel['planos_inativos'])): ?><div class="alert alert-info py-2 small"><i class="bi bi-info-circle"></i> <?= count($rel['planos_inativos']) ?> plano(s) serão criados <strong>inativos</strong> porque a ficha não tinha programação ativa no ManWinWin (nenhuma OT será gerada para eles até você definir a próxima data e ativar).</div><?php endif; ?>
+  <?php if ($rel['avisos']): ?><div class="alert alert-warning py-2 small mb-2"><strong>Avisos</strong><ul class="mb-0"><?php foreach ($rel['avisos'] as $a): ?><li><?= e($a) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
+  <?php foreach ($rel['novos'] as $t => $itens): ?>
+    <details class="small mb-1"><summary><?= e(MWW_ROTULOS[$t] ?? $t) ?> a criar (<?= count($itens) ?>)</summary><ul class="mb-1"><?php foreach (array_slice($itens, 0, 500) as $i): ?><li><?= e($i) ?></li><?php endforeach; ?></ul></details>
+  <?php endforeach; ?>
+  <?php if (!empty($rel['planos_inativos'])): ?>
+    <details class="small mb-1"><summary>Planos que ficarão inativos (<?= count($rel['planos_inativos']) ?>)</summary><ul class="mb-1"><?php foreach ($rel['planos_inativos'] as $i): ?><li><?= e($i) ?></li><?php endforeach; ?></ul></details>
+  <?php endif; ?>
+  <?php if ($rel['ignorados']): ?>
+    <details class="small mb-1"><summary>Ignorados (<?= count($rel['ignorados']) ?>)</summary><ul class="mb-1"><?php foreach (array_slice($rel['ignorados'], 0, 500) as [$t, $i, $m]): ?><li><span class="text-muted">[<?= e(MWW_ROTULOS[$t] ?? $t) ?>]</span> <?= e($i) ?> — <?= e($m) ?></li><?php endforeach; ?></ul></details>
+  <?php endif; ?>
+  <div class="d-flex flex-wrap gap-2 align-items-end mt-3">
+    <?php if (array_sum($rel['criados'])): ?>
+    <form method="post" action="<?= e(url('configuracoes/importar_aplicar')) ?>" class="d-flex flex-wrap gap-2 align-items-end"><?= csrf_field() ?>
+      <input type="hidden" name="hash" value="<?= e($imp['hash']) ?>">
+      <?= cfg_reauth('migrar') ?>
+      <div><button class="btn btn-primary" data-confirm="Gravar a importação agora? Faça backup do banco antes."><i class="bi bi-database-add"></i> Importar agora</button></div>
+    </form>
+    <?php endif; ?>
+    <form method="post" action="<?= e(url('configuracoes/importar_cancelar')) ?>"><?= csrf_field() ?><button class="btn btn-outline-secondary">Descartar</button></form>
+  </div>
+</div></div>
+<?php endif; ?>
+
+<div class="row g-3">
+  <div class="col-lg-7"><div class="card h-100"><div class="card-body">
+    <h2 class="h6"><i class="bi bi-box-arrow-in-down"></i> Importar do ManWinWin</h2>
+    <p class="small text-muted mb-2">Primeiro o sistema <strong>simula</strong> e mostra o que será criado; só grava quando você confirmar. Pode reimportar o mesmo banco depois: o que já foi importado não é duplicado nem sobrescrito.</p>
+    <form method="post" action="<?= e(url('configuracoes/importar_analisar')) ?>" enctype="multipart/form-data"><?= csrf_field() ?>
+      <div class="row g-3">
+        <div class="col-12"><label class="form-label" for="imp_arquivo">Arquivo exportado do ManWinWin</label>
+          <input type="file" class="form-control" id="imp_arquivo" name="arquivo" accept=".zip,.mdb,.accdb" required>
+          <div class="form-text">.zip gerado pelo exportador (recomendado)<?= mww_mdbtools() ? ' ou o próprio ManWinWin.mdb' : '' ?>. Limite do servidor: <?= e(ini_get('upload_max_filesize')) ?>.</div></div>
+        <div class="col-12">
+          <div class="form-check"><input class="form-check-input" type="checkbox" name="incluir_artigos" value="1" id="imp_art"><label class="form-check-label" for="imp_art">Importar também o catálogo de artigos (peças) e os saldos de estoque</label>
+            <div class="form-text">Desmarcado por padrão: o catálogo que vem com o ManWinWin é genérico (pneus, lâmpadas, extintores…).</div></div>
+          <div class="form-check"><input class="form-check-input" type="checkbox" name="incluir_modelo" value="1" id="imp_mod"><label class="form-check-label" for="imp_mod">Incluir os equipamentos de exemplo "Modelo" do ManWinWin</label></div>
+        </div>
+        <?= cfg_reauth('migrar') ?>
+        <div class="col-12"><button class="btn btn-outline-primary" <?= $mapaOk ? '' : 'disabled' ?>><i class="bi bi-search"></i> Enviar e simular</button></div>
+      </div>
+    </form>
+  </div></div></div>
+  <div class="col-lg-5"><div class="card h-100"><div class="card-body small">
+    <h2 class="h6">Como gerar o arquivo</h2>
+    <ol class="ps-3 mb-2">
+      <li>No computador do ManWinWin, feche o programa e copie a pasta <code>tools/manwinwin</code> do sistema.</li>
+      <li>Arraste o <code>ManWinWin.mdb</code> sobre <code>exportar_manwinwin.bat</code>.</li>
+      <li>Envie aqui o <code>.zip</code> criado ao lado do .mdb.</li>
+    </ol>
+    <h2 class="h6 mt-3">O que é importado</h2>
+    <ul class="ps-3 mb-0">
+      <li>Localizações, fornecedores, tipos de equipamento e especialidades em uso</li>
+      <li>Equipamentos → ativos (marca, modelo, série, valor, criticidade, hierarquia)</li>
+      <li>Funcionários → técnicos</li>
+      <li>Fichas de manutenção → planos preventivos com checklist; as fichas programadas no ManWinWin entram ativas</li>
+      <li>OTs emitidas/fechadas e pedidos de trabalho, com as tarefas</li>
+    </ul>
+    <p class="text-muted mt-2 mb-0">Não importa: exemplos e cadastros-padrão do ManWinWin, usuários e senhas, contas, moedas e licença.</p>
+  </div></div></div>
+</div>
+
 <?php elseif ($aba === 'sistema'):
     $migr = glob(APP_ROOT . '/database/migracoes/*.sql') ?: [];
     sort($migr);
@@ -372,7 +514,7 @@ view_header('Configurações', 'configuracoes');
 </div>
 <?php endif; ?>
 
-<?php if ($aba !== 'sistema'): ?>
+<?php if (!in_array($aba, CONFIG_ABAS_SEM_FORM, true)): ?>
     <?= cfg_reauth($aba) ?>
   </div>
   <div class="mt-4 d-flex gap-2 flex-wrap">

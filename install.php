@@ -48,7 +48,7 @@ if ($emUso && !isset($opt['recriar'])) {
 try {
     $sql = preg_replace('/^--.*$/m', '', (string)file_get_contents(__DIR__ . '/database/schema.sql'));
     foreach (array_filter(array_map('trim', explode(';', $sql))) as $stmt) db()->exec($stmt);
-    db()->exec('DROP TABLE IF EXISTS migracoes, fila_emails, sequencias, login_falhas, rate_limites');
+    db()->exec('DROP TABLE IF EXISTS migracoes, fila_emails, sequencias, login_falhas, rate_limites, importacao_mapa');
     aplicar_migracoes();
     echo "✔ Estrutura criada (schema + migrações)\n";
 
