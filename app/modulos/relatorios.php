@@ -107,7 +107,7 @@ foreach ($porAtivo as &$r) {
 unset($r);
 
 $causas = q("SELECT COALESCE(causa_falha,'(não informada)') causa, COUNT(*) n, SUM(horas_parada) parada FROM ordens_trabalho o
-             WHERE tipo='corretiva' AND status='concluida' AND data_fim BETWEEN ? AND ? $fa GROUP BY COALESCE(causa_falha,'(não informada)') ORDER BY n DESC LIMIT 15", $p);
+             WHERE tipo='corretiva' AND ativo_id IS NOT NULL AND status='concluida' AND data_fim BETWEEN ? AND ? $fa GROUP BY COALESCE(causa_falha,'(não informada)') ORDER BY n DESC LIMIT 15", $p);
 $tecnicos = q("SELECT t.nome, SUM(m.horas) horas, SUM(m.horas*m.custo_hora) custo, COUNT(DISTINCT m.ot_id) ots
                FROM ot_mao_obra m JOIN tecnicos t ON t.id=m.tecnico_id JOIN ordens_trabalho o ON o.id=m.ot_id
                WHERE m.data BETWEEN ? AND ? $fa GROUP BY t.id, t.nome ORDER BY horas DESC", [$ini, $fim]);
