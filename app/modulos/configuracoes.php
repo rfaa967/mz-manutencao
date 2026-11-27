@@ -105,6 +105,65 @@ if (is_post() && in_array($acao, ['importar_analisar', 'importar_aplicar', 'impo
     $voltar('importar');
 }
 
+/* ---------- importação das planilhas de OM (Excel): simulação → confirmação ---------- */
+if (is_post() && in_array($acao, ['importar_om_analisar', 'importar_om_aplicar', 'importar_om_cancelar'], true)) {
+    require_once APP_ROOT . '/app/importacao_om.php';
+    $dirImp = APP_ROOT . '/storage/importacoes';
+    $descartarOm = function () use ($dirImp): void {
+        foreach ((array)($_SESSION['importacao_om']['arquivos'] ?? []) as $a) {
+            $arq = (string)($a['caminho'] ?? '');
+            if ($arq !== '' && is_file($arq) && str_starts_with((string)realpath($arq), (string)realpath($dirImp) . DIRECTORY_SEPARATOR)) @unlink($arq);
+        }
+        unset($_SESSION['importacao_om']);
+    };
+    if ($acao === 'importar_om_cancelar') { $descartarOm(); flash('Importação descartada; nada foi gravado.'); $voltar('importar'); }
+    if ($erro = config_reautenticar()) { flash($erro, 'danger'); $voltar('importar'); }
+    if (!qv("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ordens_trabalho' AND column_name = 'area'")) {
+        flash('Atualize o banco de dados (aba Sistema) antes de importar.', 'warning'); $voltar('sistema');
+    }
+    try {
+        if ($acao === 'importar_om_analisar') {
+            limitar('importacao', 'u' . usuario()['id'], 30, 3600);
+            $descartarOm();
+            $fs = $_FILES['planilhas'] ?? null;
+            $nomes = is_array($fs['name'] ?? null) ? $fs['name'] : [];
+            if (!$nomes || ($fs['error'][0] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) throw new RuntimeException('Selecione as planilhas de OM (.xlsx).');
+            if (count($nomes) > 12) throw new RuntimeException('Envie no máximo 12 planilhas por vez.');
+            if (!is_dir($dirImp) && !@mkdir($dirImp, 0770, true)) throw new RuntimeException('Não foi possível criar storage/importacoes (verifique a permissão da pasta storage/).');
+            foreach (glob($dirImp . '/*') ?: [] as $velho) if (is_file($velho) && filemtime($velho) < time() - 86400) @unlink($velho);
+            $arquivos = [];
+            foreach ($nomes as $i => $nomeOrig) {
+                $err = (int)($fs['error'][$i] ?? UPLOAD_ERR_NO_FILE);
+                if ($err === UPLOAD_ERR_INI_SIZE || $err === UPLOAD_ERR_FORM_SIZE) throw new RuntimeException("$nomeOrig: maior que o limite do servidor (" . ini_get('upload_max_filesize') . ').');
+                if ($err !== UPLOAD_ERR_OK || !is_uploaded_file((string)$fs['tmp_name'][$i])) throw new RuntimeException("Falha no envio de $nomeOrig.");
+                if (strtolower(pathinfo((string)$nomeOrig, PATHINFO_EXTENSION)) !== 'xlsx') throw new RuntimeException("$nomeOrig: envie planilhas do Excel (.xlsx). Se estiver em .xls, abra no Excel e salve como .xlsx.");
+                $destino = $dirImp . '/' . bin2hex(random_bytes(16)) . '.xlsx';
+                if (!move_uploaded_file((string)$fs['tmp_name'][$i], $destino)) throw new RuntimeException('Não foi possível salvar o arquivo enviado (verifique a permissão da pasta storage/).');
+                $arquivos[] = ['caminho' => $destino, 'nome' => mb_substr(basename(str_replace('\\', '/', (string)$nomeOrig)), 0, 120), 'hash' => hash_file('sha256', $destino)];
+            }
+            $_SESSION['importacao_om'] = ['arquivos' => $arquivos, 'em' => time(), 'hash' => hash('sha256', implode('|', array_column($arquivos, 'hash')))];
+            $rel = (new ImportadorPlanilhasOM($arquivos, (int)usuario()['id']))->executar(false);
+            if (count($rel['novos']['ordens_trabalho'] ?? []) > 300) $rel['novos']['ordens_trabalho'] = array_slice($rel['novos']['ordens_trabalho'], 0, 300);   // sessão enxuta
+            $_SESSION['importacao_om']['relatorio'] = $rel;
+        } else {
+            $s = $_SESSION['importacao_om'] ?? null;
+            $valido = $s && hash_equals((string)$s['hash'], (string)post('hash')) && time() - (int)$s['em'] <= 7200;
+            foreach ((array)($s['arquivos'] ?? []) as $a) $valido = $valido && is_file($a['caminho']) && hash_file('sha256', $a['caminho']) === $a['hash'];
+            if (!$valido) { $descartarOm(); throw new RuntimeException('A simulação expirou ou os arquivos mudaram. Envie as planilhas de novo.'); }
+            $rel = (new ImportadorPlanilhasOM($s['arquivos'], (int)usuario()['id']))->executar(true);
+            auditar('importacao', 'planilha_om', null, implode(', ', array_column($s['arquivos'], 'nome')) . ': ' . om_resumo($rel));
+            $descartarOm();
+            $_SESSION['importacao_feita'] = ['nome' => 'Planilhas de OM', 'resumo' => om_resumo($rel), 'inativos' => 0];
+            flash('Importação concluída: ' . om_resumo($rel) . '.');
+        }
+    } catch (Throwable $ex) {
+        error_log('[MZManut] importação de OMs: ' . $ex);
+        if ($acao === 'importar_om_analisar') $descartarOm();
+        flash('Importação: ' . mb_substr($ex->getMessage(), 0, 400), 'danger');
+    }
+    $voltar('importar');
+}
+
 if (is_post() && !$tabelaOk) { flash('Atualize o banco de dados (aba Sistema) antes de alterar configurações.', 'warning'); $voltar('sistema'); }
 
 if (is_post() && $acao === 'email_teste') {
@@ -432,6 +491,44 @@ view_header('Configurações', 'configuracoes');
   </div>
 </div></div>
 <?php endif; ?>
+
+<?php $om = $_SESSION['importacao_om'] ?? null; $relOm = $om['relatorio'] ?? null; if ($relOm): require_once APP_ROOT . '/app/importacao_om.php'; ?>
+<div class="card mb-3 border-primary"><div class="card-body">
+  <h2 class="h6"><i class="bi bi-clipboard-check"></i> Simulação das planilhas de OM <span class="badge text-bg-secondary">nada foi gravado ainda</span></h2>
+  <p class="small text-muted mb-2"><?= e(implode(' · ', array_column($om['arquivos'], 'nome'))) ?></p>
+  <ul class="small mb-2">
+    <li><strong><?= (int)($relOm['criados']['ordens_trabalho'] ?? 0) ?></strong> OMs novas<?= !empty($relOm['existentes']['ordens_trabalho']) ? ' · ' . (int)$relOm['existentes']['ordens_trabalho'] . ' já importadas antes' : '' ?>
+      <?php if ($st = $relOm['resumo']['status'] ?? []): ?>(<?= e(implode(', ', array_map(fn($k, $v) => mb_strtolower(rotulo('ot_status', $k)) . " $v", array_keys($st), $st))) ?>)<?php endif; ?></li>
+    <?php if ($ar = $relOm['resumo']['area'] ?? []): ?><li>Por área: <?= e(implode(', ', array_map(fn($k, $v) => ($k ? rotulo('area', $k) : 'sem área') . " $v", array_keys($ar), $ar))) ?></li><?php endif; ?>
+    <li><?= (int)($relOm['criados']['tecnicos'] ?? 0) ?> técnico(s) novo(s)<?= !empty($relOm['novos']['tecnicos']) ? ': ' . e(implode(', ', $relOm['novos']['tecnicos'])) : '' ?></li>
+    <li><?= (int)($relOm['resumo']['ligadas_ativo'] ?? 0) ?> ligada(s) a um ativo pelo código patrimonial · <?= (int)($relOm['resumo']['repetidas'] ?? 0) ?> linha(s) repetida(s) entre meses unificada(s)</li>
+  </ul>
+  <?php if ($relOm['avisos']): ?><div class="alert alert-warning py-2 small mb-2"><ul class="mb-0"><?php foreach ($relOm['avisos'] as $a): ?><li><?= e($a) ?></li><?php endforeach; ?></ul></div><?php endif; ?>
+  <?php if (!empty($relOm['novos']['ordens_trabalho'])): ?>
+    <details class="small mb-1"><summary>OMs a criar (<?= (int)($relOm['criados']['ordens_trabalho'] ?? 0) ?><?= ($relOm['criados']['ordens_trabalho'] ?? 0) > 300 ? ', mostrando 300' : '' ?>)</summary><ul class="mb-1"><?php foreach ($relOm['novos']['ordens_trabalho'] as $i): ?><li><?= e($i) ?></li><?php endforeach; ?></ul></details>
+  <?php endif; ?>
+  <?php if ($relOm['ignorados']): ?><details class="small mb-1"><summary>Linhas ignoradas (<?= count($relOm['ignorados']) ?>)</summary><ul class="mb-1"><?php foreach ($relOm['ignorados'] as [$t, $i, $m]): ?><li><?= e($i) ?> — <?= e($m) ?></li><?php endforeach; ?></ul></details><?php endif; ?>
+  <div class="d-flex flex-wrap gap-2 align-items-end mt-3">
+    <?php if (!empty($relOm['criados']['ordens_trabalho'])): ?>
+    <form method="post" action="<?= e(url('configuracoes/importar_om_aplicar')) ?>" class="d-flex flex-wrap gap-2 align-items-end"><?= csrf_field() ?>
+      <input type="hidden" name="hash" value="<?= e($om['hash']) ?>"><?= cfg_reauth('migrar') ?>
+      <div><button class="btn btn-primary" data-confirm="Gravar as OMs agora? Faça backup do banco antes."><i class="bi bi-database-add"></i> Importar agora</button></div></form>
+    <?php endif; ?>
+    <form method="post" action="<?= e(url('configuracoes/importar_om_cancelar')) ?>"><?= csrf_field() ?><button class="btn btn-outline-secondary">Descartar</button></form>
+  </div>
+</div></div>
+<?php endif; ?>
+
+<div class="card mb-3"><div class="card-body">
+  <h2 class="h6"><i class="bi bi-file-earmark-spreadsheet"></i> Importar planilhas de OM (Excel)</h2>
+  <p class="small text-muted mb-2">As planilhas de controle de OM — mecânica (OMM), elétrica (OME) e civil (OMC/SMC), uma aba por mês. Cada linha vira uma OM; a área vem do nome do arquivo, a situação das datas (término = concluída). A mesma SM repetida em vários meses entra uma vez, com a situação mais recente. Pode reenviar as planilhas atualizadas depois: só as linhas novas entram.</p>
+  <form method="post" action="<?= e(url('configuracoes/importar_om_analisar')) ?>" enctype="multipart/form-data" class="row g-3 align-items-end"><?= csrf_field() ?>
+    <div class="col-md-7"><label class="form-label" for="imp_om">Planilhas (.xlsx, pode selecionar várias)</label>
+      <input type="file" class="form-control" id="imp_om" name="planilhas[]" accept=".xlsx" multiple required></div>
+    <?= cfg_reauth('migrar') ?>
+    <div class="col-auto"><button class="btn btn-outline-primary" <?= $mapaOk ? '' : 'disabled' ?>><i class="bi bi-search"></i> Enviar e simular</button></div>
+  </form>
+</div></div>
 
 <div class="row g-3">
   <div class="col-lg-7"><div class="card h-100"><div class="card-body">

@@ -254,6 +254,7 @@ const ROTULOS = [
         'corretiva' => ['Corretiva', 'danger'], 'preventiva' => ['Preventiva', 'success'], 'preditiva' => ['Preditiva', 'info'],
         'inspecao' => ['Inspeção', 'primary'], 'lubrificacao' => ['Lubrificação', 'warning'], 'calibracao' => ['Calibração', 'secondary'], 'melhoria' => ['Melhoria', 'dark'],
     ],
+    'area' => ['mecanica' => ['Mecânica (OMM)', 'primary'], 'eletrica' => ['Elétrica (OME)', 'warning'], 'civil' => ['Civil (OMC)', 'secondary'], 'outros' => ['Outros', 'light']],
     'perfil' => ['admin' => ['Administrador', 'danger'], 'gestor' => ['Gestor', 'primary'], 'tecnico' => ['Técnico', 'info'], 'solicitante' => ['Solicitante', 'secondary']],
 ];
 
@@ -377,3 +378,18 @@ function json_out($dados): never
     echo json_encode($dados, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
     exit;
 }
+
+/**
+ * Código do bem patrimonial no formato da empresa (ex.: C1.10.016). Aceita as variações digitadas nas
+ * planilhas: "C1 10 016", "c1-10.016", "C110016" → "C1.10.016". Outros formatos ficam só em maiúsculas.
+ */
+function patrimonio_normalizar(?string $v): ?string
+{
+    $v = mb_strtoupper(trim((string)$v));
+    if ($v === '' || preg_match('/^[-*.\s]+$/', $v)) return null;
+    $limpo = preg_replace('/[\s._\-\/]+/', '', $v);
+    if (preg_match('/^([A-Z]\d)(\d{2})(\d{3})$/', $limpo, $m)) return "$m[1].$m[2].$m[3]";
+    return mb_substr(preg_replace('/[\s_\-\/]+/', '.', $v), 0, 40);
+}
+/** true se o texto já está no formato patrimonial da empresa (letra+dígito.2.3). */
+function patrimonio_valido(?string $v): bool { return (bool)preg_match('/^[A-Z]\d\.\d{2}\.\d{3}$/', (string)$v); }

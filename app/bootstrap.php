@@ -3,7 +3,7 @@ declare(strict_types=1);
 
 ini_set('display_errors', '0');   // antes de ler o config: erro de sintaxe nele não aparece na tela
 define('APP_ROOT', dirname(__DIR__));
-const APP_VERSAO = '3.2.0';
+const APP_VERSAO = '3.3.0';
 
 $cfgFile = APP_ROOT . '/config/config.php';
 if (!is_file($cfgFile)) {

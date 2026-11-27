@@ -10,7 +10,7 @@ if ($acao === 'salvar' && is_post()) {
     exigir('gerir');
     $id = post_int('id');
     $dados = [
-        'codigo' => mb_strtoupper((string)post('codigo')), 'nome' => (string)post('nome'),
+        'codigo' => mb_strtoupper((string)post('codigo')), 'patrimonio' => patrimonio_normalizar(post('patrimonio')), 'nome' => (string)post('nome'),
         'parent_id' => post_int('parent_id'), 'localizacao_id' => post_int('localizacao_id'),
         'categoria_id' => post_int('categoria_id'), 'fornecedor_id' => post_int('fornecedor_id'),
         'fabricante' => post('fabricante') ?: null, 'modelo' => post('modelo') ?: null, 'numero_serie' => post('numero_serie') ?: null,
@@ -32,10 +32,12 @@ if ($acao === 'salvar' && is_post()) {
     try {
         if ($id) { update('ativos', $dados, $id); auditar('editar', 'ativos', $id); }
         else { $id = insert('ativos', $dados); auditar('criar', 'ativos', $id); }
-        flash('Ativo salvo.');
+        // OMs registradas só com o código patrimonial (planilhas, OTs avulsas) passam a fazer parte do histórico do ativo
+        $ligadas = $dados['patrimonio'] ? qx('UPDATE ordens_trabalho SET ativo_id = ? WHERE ativo_id IS NULL AND patrimonio = ?', [$id, $dados['patrimonio']]) : 0;
+        flash('Ativo salvo.' . ($ligadas ? ' ' . plural($ligadas, 'OM com este patrimônio foi ligada', 'OMs com este patrimônio foram ligadas') . ' ao ativo.' : ''));
         redirect('ativos/ver', ['id' => $id]);
     } catch (PDOException $ex) {
-        flash($ex->getCode() === '23000' ? 'Já existe um ativo com esse código.' : 'Erro ao salvar.', 'danger');
+        flash($ex->getCode() === '23000' ? 'Já existe um ativo com esse código ou com esse código patrimonial.' : 'Erro ao salvar.', 'danger');
         redirect('ativos/form', $id ? ['id' => $id] : []);
     }
 }
@@ -130,7 +132,7 @@ if ($acao === 'etiquetas') {
     if ($l = get('loc')) { $w[] = 'a.localizacao_id IN (' . implode(',', descendentes('localizacoes', (int)$l)) . ')'; }
     if ($c = get('cat')) { $w[] = 'a.categoria_id = ?'; $prm[] = (int)$c; }
     if ($cr = get('crit')) { $w[] = 'a.criticidade = ?'; $prm[] = $cr; }
-    $lista = q('SELECT a.id, a.codigo, a.nome, l.nome AS local FROM ativos a LEFT JOIN localizacoes l ON l.id = a.localizacao_id WHERE ' . implode(' AND ', $w) . ' ORDER BY a.codigo LIMIT 500', $prm);
+    $lista = q('SELECT a.id, a.codigo, a.patrimonio, a.nome, l.nome AS local FROM ativos a LEFT JOIN localizacoes l ON l.id = a.localizacao_id WHERE ' . implode(' AND ', $w) . ' ORDER BY a.codigo LIMIT 500', $prm);
     $tam = in_array(get('tam'), ['p', 'm', 'g'], true) ? get('tam') : 'm';
     $mm = ['p' => 38, 'm' => 50, 'g' => 70][$tam];
     view_header('Etiquetas QR', 'ativos'); ?>
@@ -156,7 +158,7 @@ if ($acao === 'etiquetas') {
     <div class="etq-grade">
       <?php foreach ($lista as $a): ?>
         <div class="etq"><div class="qr" data-qr="<?= e(url_qr($a['codigo'])) ?>"></div>
-          <div class="txt"><div class="cod"><?= e($a['codigo']) ?></div><div><?= e($a['nome']) ?></div><div class="text-muted"><?= e($a['local']) ?></div>
+          <div class="txt"><div class="cod"><?= e($a['codigo']) ?><?= $a['patrimonio'] ? ' · ' . e($a['patrimonio']) : '' ?></div><div><?= e($a['nome']) ?></div><div class="text-muted"><?= e($a['local']) ?></div>
             <div class="text-muted mt-1"><?= e(cfg('empresa')) ?> · Manutenção</div></div></div>
       <?php endforeach; if (!$lista): ?><p class="text-muted">Nenhum ativo para os filtros.</p><?php endif; ?>
     </div>
@@ -177,7 +179,9 @@ if ($acao === 'form') {
     <form method="post" action="<?= e(url('ativos/salvar')) ?>"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $id ?: '' ?>">
     <div class="card mb-3"><div class="card-header bg-white fw-semibold">Identificação</div><div class="card-body"><div class="row g-3">
       <div class="col-md-3"><label class="form-label">Código *</label><input class="form-control text-uppercase" name="codigo" required maxlength="40" value="<?= e($a['codigo'] ?? '') ?>"></div>
-      <div class="col-md-9"><label class="form-label">Nome / designação *</label><input class="form-control" name="nome" required value="<?= e($a['nome'] ?? '') ?>"></div>
+      <div class="col-md-3"><label class="form-label" for="patrimonio">Cód. patrimônio</label><input class="form-control text-uppercase" id="patrimonio" name="patrimonio" maxlength="40" placeholder="C1.10.016" value="<?= e($a['patrimonio'] ?? '') ?>">
+        <div class="form-text">Código do bem patrimonial (plaqueta).</div></div>
+      <div class="col-md-6"><label class="form-label">Nome / designação *</label><input class="form-control" name="nome" required value="<?= e($a['nome'] ?? '') ?>"></div>
       <div class="col-md-6"><label class="form-label">Ativo pai (componente de)</label><?= sel('parent_id', arvore_opcoes('ativos', 'nome', $id ?: null), $a['parent_id'] ?? null) ?></div>
       <div class="col-md-6"><label class="form-label">Localização</label><?= sel('localizacao_id', $locs, $a['localizacao_id'] ?? null) ?></div>
       <div class="col-md-4"><label class="form-label">Categoria</label><?= sel('categoria_id', $cats, $a['categoria_id'] ?? null) ?></div>
@@ -216,6 +220,12 @@ if ($acao === 'ver') {
     $ots = q("SELECT o.*, t.nome AS responsavel, " . SQL_CUSTO_OT . " + " . SQL_CUSTO_MAT . " + o.custo_externo AS custo
               FROM ordens_trabalho o LEFT JOIN tecnicos t ON t.id=o.responsavel_id WHERE o.ativo_id = ? ORDER BY o.data_abertura DESC", [$id]);
     $docs = q('SELECT * FROM ativo_documentos WHERE ativo_id = ? ORDER BY enviado_em DESC', [$id]);
+    // peças consumidas (baixadas) nas OTs do ativo e dos componentes
+    $idsPecas = implode(',', descendentes('ativos', $id));
+    $pecas = q("SELECT ar.id, ar.codigo, ar.descricao, ar.unidade, SUM(m.quantidade) qtd, SUM(m.quantidade * m.custo_unitario) custo,
+                       COUNT(DISTINCT m.ot_id) ots, MAX(COALESCE(o.data_fim, o.data_abertura)) ultima
+                FROM ot_materiais m JOIN artigos ar ON ar.id = m.artigo_id JOIN ordens_trabalho o ON o.id = m.ot_id
+                WHERE m.baixado = 1 AND o.ativo_id IN ($idsPecas) GROUP BY ar.id, ar.codigo, ar.descricao, ar.unidade ORDER BY custo DESC");
 
     // indicadores do ativo e componentes (12 meses) — mesmas regras do relatório geral
     $ini = date('Y-m-d', strtotime('-12 months +1 day'));
@@ -246,7 +256,7 @@ if ($acao === 'ver') {
     </div>
 
     <ul class="nav nav-tabs">
-      <?php foreach (['geral' => 'Ficha', 'ots' => 'Histórico (' . count($ots) . ')', 'planos' => 'Planos (' . count($planos) . ')', 'docs' => 'Documentos (' . count($docs) . ')'] as $tk => $tr): ?>
+      <?php foreach (['geral' => 'Ficha', 'ots' => 'Histórico (' . count($ots) . ')', 'planos' => 'Planos (' . count($planos) . ')', 'pecas' => 'Peças (' . count($pecas) . ')', 'docs' => 'Documentos (' . count($docs) . ')'] as $tk => $tr): ?>
         <li class="nav-item"><a class="nav-link <?= $tab === $tk ? 'active' : '' ?>" href="<?= e(url('ativos/ver', ['id' => $id, 'tab' => $tk])) ?>"><?= $tr ?></a></li>
       <?php endforeach; ?>
     </ul>
@@ -256,6 +266,7 @@ if ($acao === 'ver') {
         <div class="col-lg-7">
           <table class="table table-sm">
             <?php foreach ([
+                'Cód. patrimônio' => $a['patrimonio'] ? '<strong>' . e($a['patrimonio']) . '</strong>' : '<span class="text-muted">não informado</span>',
                 'Ativo pai' => $a['pai_codigo'] ? '<a href="' . e(url('ativos/ver', ['id' => $a['parent_id']])) . '">' . e($a['pai_codigo'] . ' · ' . $a['pai_nome']) . '</a>' : '—',
                 'Categoria' => e($a['categoria']), 'Criticidade' => e($a['criticidade']), 'Fabricante' => e($a['fabricante']), 'Modelo' => e($a['modelo']),
                 'Nº série' => e($a['numero_serie']), 'Fornecedor' => e($a['fornecedor']), 'Aquisição' => dt($a['data_aquisicao']) . ($a['valor_aquisicao'] ? ' · ' . moeda($a['valor_aquisicao']) : ''),
@@ -307,6 +318,16 @@ if ($acao === 'ver') {
       <?php endforeach; if (!$planos): ?><tr><td colspan="6" class="text-muted text-center">Nenhum plano.</td></tr><?php endif; ?>
       </tbody></table>
 
+    <?php elseif ($tab === 'pecas'): ?>
+      <div class="d-flex justify-content-between align-items-center mb-2"><span class="small text-muted">Peças baixadas do estoque nas OTs deste ativo<?= count(explode(',', $idsPecas)) > 1 ? ' e dos componentes' : '' ?> (todo o histórico).</span>
+        <?php if (pode('gerir')): ?><a class="small no-print" href="<?= e(url('relatorios/consumo', ['ativo' => $id])) ?>">Relatório por período</a><?php endif; ?></div>
+      <div class="table-responsive"><table class="table table-sm table-hover"><thead><tr><th>Código</th><th>Peça / material</th><th class="text-end">Qtd</th><th class="text-end">OTs</th><th>Última</th><th class="text-end">Custo</th></tr></thead><tbody>
+      <?php foreach ($pecas as $pc): ?>
+        <tr><td><?= e($pc['codigo']) ?></td><td><?= e($pc['descricao']) ?></td><td class="text-end"><?= num($pc['qtd'], 2) ?> <?= e($pc['unidade']) ?></td><td class="text-end"><?= (int)$pc['ots'] ?></td><td><?= dt($pc['ultima']) ?></td><td class="text-end"><?= moeda($pc['custo']) ?></td></tr>
+      <?php endforeach; if (!$pecas): ?><tr><td colspan="6" class="text-muted text-center">Nenhuma peça baixada em OT deste ativo.</td></tr><?php else: ?>
+        <tr class="fw-semibold"><td colspan="5">Total</td><td class="text-end"><?= moeda(array_sum(array_column($pecas, 'custo'))) ?></td></tr><?php endif; ?>
+      </tbody></table></div>
+
     <?php else: ?>
       <?php if (pode('executar')): ?>
       <form class="row g-2 mb-3 no-print" method="post" enctype="multipart/form-data" action="<?= e(url('ativos/upload')) ?>"><?= csrf_field() ?>
@@ -333,9 +354,10 @@ if ($acao === 'ver') {
 $modo = get('modo') === 'arvore' ? 'arvore' : 'lista';
 $t = new Tabela('ativos',
     'ativos a LEFT JOIN categorias_ativo c ON c.id = a.categoria_id LEFT JOIN localizacoes l ON l.id = a.localizacao_id',
-    'a.id, a.codigo, a.nome, a.criticidade, a.status, a.fabricante, a.modelo, a.numero_serie, c.nome AS categoria, l.nome AS local,
+    'a.id, a.codigo, a.patrimonio, a.nome, a.criticidade, a.status, a.fabricante, a.modelo, a.numero_serie, c.nome AS categoria, l.nome AS local,
      (SELECT COUNT(*) FROM ordens_trabalho o WHERE o.ativo_id = a.id AND o.status IN (' . STATUS_PENDENTES . ')) AS ots_abertas', [
-    'codigo' => ['rotulo' => 'Código', 'ordem' => 'a.codigo', 'busca' => 'a.codigo', 'classe' => 'fw-semibold text-nowrap', 'render' => fn($r) => e($r['codigo'])],
+    'codigo' => ['rotulo' => 'Código', 'ordem' => 'a.codigo', 'busca' => "CONCAT_WS(' ', a.codigo, a.patrimonio, REPLACE(a.patrimonio, '.', ''))", 'classe' => 'fw-semibold text-nowrap', 'render' => fn($r) => e($r['codigo'])],
+    'patrimonio' => ['rotulo' => 'Patrimônio', 'ordem' => 'a.patrimonio', 'classe' => 'text-nowrap d-none d-md-table-cell', 'render' => fn($r) => e($r['patrimonio'])],
     'nome' => ['rotulo' => 'Nome', 'ordem' => 'a.nome', 'busca' => "CONCAT_WS(' ', a.nome, a.fabricante, a.modelo, a.numero_serie)",
                'render' => fn($r) => e($r['nome']) . ($r['modelo'] ? '<div class="small text-muted">' . e(trim($r['fabricante'] . ' ' . $r['modelo'])) . '</div>' : ''), 'csv' => fn($r) => $r['nome']],
     'categoria' => ['rotulo' => 'Categoria', 'ordem' => 'c.nome', 'busca' => 'c.nome', 'classe' => 'd-none d-md-table-cell', 'render' => fn($r) => e($r['categoria'])],
@@ -347,7 +369,7 @@ $t = new Tabela('ativos',
     'serie' => ['rotulo' => 'Nº série', 'classe' => 'd-none', 'render' => fn($r) => '', 'csv' => fn($r) => $r['numero_serie']],
 ]);
 $t->ordemPadrao = 'codigo'; $t->desempate = 'a.id';
-$t->placeholder = 'Código, nome, modelo, série, local…';
+$t->placeholder = 'Código, patrimônio, nome, modelo, série, local…';
 $t->href = fn($r) => url('ativos/ver', ['id' => $r['id']]);
 if ($l = (int)get('loc')) $t->where[] = 'a.localizacao_id IN (' . implode(',', descendentes('localizacoes', $l)) . ')';
 if ($c = (int)get('cat')) { $t->where[] = 'a.categoria_id = ?'; $t->params[] = $c; }

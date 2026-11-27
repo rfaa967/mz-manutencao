@@ -70,7 +70,7 @@ if ($acao === 'scan') {
 if ($acao === 'buscar') {
     $t = trim((string)get('q', ''));
     $res = $t === '' ? [] : q("SELECT a.id, a.codigo, a.nome, a.status, l.nome AS local FROM ativos a LEFT JOIN localizacoes l ON l.id=a.localizacao_id
-        WHERE a.status <> 'desativado' AND (a.codigo = ? OR a.codigo LIKE ? OR a.nome LIKE ?) ORDER BY a.codigo = ? DESC, a.codigo LIMIT 40", [$t, "$t%", "%$t%", $t]);
+        WHERE a.status <> 'desativado' AND (a.codigo = ? OR a.codigo LIKE ? OR a.nome LIKE ? OR a.patrimonio = ?) ORDER BY a.codigo = ? DESC, a.codigo LIMIT 40", [$t, "$t%", "%$t%", patrimonio_normalizar($t), $t]);
     if (count($res) === 1) redirect('m/ativo', ['id' => $res[0]['id']]);
     m_header('Buscar equipamento', url('m'), 'inicio'); ?>
     <form method="get" class="mb-3"><input type="hidden" name="r" value="m/buscar">
@@ -84,7 +84,7 @@ if ($acao === 'buscar') {
 
 /* ---------------- Ficha do ativo ---------------- */
 if ($acao === 'ativo') {
-    $a = get('id') ? q1('SELECT * FROM ativos WHERE id = ?', [(int)get('id')]) : q1('SELECT * FROM ativos WHERE codigo = ?', [mb_strtoupper(trim((string)get('c', '')))]);
+    $a = get('id') ? q1('SELECT * FROM ativos WHERE id = ?', [(int)get('id')]) : q1('SELECT * FROM ativos WHERE codigo = ? OR patrimonio = ? ORDER BY codigo = ? DESC LIMIT 1', [mb_strtoupper(trim((string)get('c', ''))), patrimonio_normalizar((string)get('c', '')), mb_strtoupper(trim((string)get('c', '')))]);
     if (!$a) {
         $cod = (string)get('c', '');
         flash(preg_match('/^[A-Z0-9][A-Z0-9\-_.\/]{0,39}$/i', $cod) ? "Equipamento não encontrado: $cod" : 'Equipamento não encontrado.', 'warning');

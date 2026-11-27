@@ -9,6 +9,75 @@ if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $ini) || !preg_match('/^\d{4}-\d{2}-\d{
     $ini = date('Y-m-01'); $fim = date('Y-m-d');
 }
 $ativoF = (int)get('ativo', 0);
+
+/* ================= CONSUMO DE PEÇAS POR EQUIPAMENTO ================= */
+if ($acao === 'consumo') {
+    $w = ['m.baixado = 1', "o.status <> 'cancelada'", 'COALESCE(o.data_fim, o.data_abertura) BETWEEN ? AND ?'];
+    $prm = [$ini . ' 00:00:00', $fim . ' 23:59:59'];
+    if ($ativoF) $w[] = 'o.ativo_id IN (' . implode(',', descendentes('ativos', $ativoF)) . ')';
+    $patF = patrimonio_normalizar((string)get('patrimonio', ''));
+    if ($patF) { $w[] = '(a.patrimonio = ? OR o.patrimonio = ?)'; array_push($prm, $patF, $patF); }
+    $artF = trim((string)get('artigo', ''));
+    if ($artF !== '') { $w[] = "CONCAT_WS(' ', ar.codigo, ar.descricao) LIKE ?"; $prm[] = '%' . $artF . '%'; }
+    $areaF = array_key_exists((string)get('area'), ROTULOS['area']) ? (string)get('area') : '';
+    if ($areaF) { $w[] = 'o.area = ?'; $prm[] = $areaF; }
+    $empF = trim((string)get('empresa', ''));
+    if ($empF !== '') { $w[] = 'o.empresa = ?'; $prm[] = $empF; }
+    $where = implode(' AND ', $w);
+    $from = 'ot_materiais m JOIN artigos ar ON ar.id = m.artigo_id JOIN ordens_trabalho o ON o.id = m.ot_id LEFT JOIN ativos a ON a.id = o.ativo_id';
+    // equipamento: o ativo cadastrado; sem ativo, o patrimônio/equipamento informado na OT
+    $chave = "COALESCE(CONCAT('a', a.id), CONCAT('p', o.patrimonio), CONCAT('e', o.equipamento), 'x')";
+    $linhas = q("SELECT $chave AS eq, MAX(a.id) ativo_id, MAX(COALESCE(a.patrimonio, o.patrimonio)) pat, MAX(a.codigo) cod_ativo, MAX(COALESCE(a.nome, o.equipamento)) equip,
+                        ar.codigo art_codigo, ar.descricao art_desc, ar.unidade, SUM(m.quantidade) qtd, SUM(m.quantidade * m.custo_unitario) custo,
+                        COUNT(DISTINCT m.ot_id) ots, MAX(COALESCE(o.data_fim, o.data_abertura)) ultima
+                 FROM $from WHERE $where GROUP BY eq, ar.id, ar.codigo, ar.descricao, ar.unidade ORDER BY MAX(COALESCE(a.patrimonio, o.patrimonio)) IS NULL, MAX(COALESCE(a.patrimonio, o.patrimonio)), MAX(a.codigo), MAX(COALESCE(a.nome, o.equipamento)), SUM(m.quantidade * m.custo_unitario) DESC", $prm);
+    if (get('csv') === 'resumo') {
+        csv_download('consumo_pecas_por_equipamento', ['Patrimônio', 'Código ativo', 'Equipamento', 'Código peça', 'Peça / material', 'Qtd', 'Unid.', 'Custo (R$)', 'OTs', 'Último consumo'],
+            array_map(fn($r) => [$r['pat'], $r['cod_ativo'], $r['equip'], $r['art_codigo'], $r['art_desc'], num($r['qtd'], 3), $r['unidade'], num($r['custo']), $r['ots'], dt($r['ultima'])], $linhas));
+    }
+    if (get('csv') === 'itens') {
+        $itens = q("SELECT COALESCE(a.patrimonio, o.patrimonio) pat, a.codigo cod_ativo, COALESCE(a.nome, o.equipamento) equip, o.numero, o.tipo, o.area,
+                           COALESCE(o.data_fim, o.data_abertura) dt, ar.codigo art_codigo, ar.descricao art_desc, ar.unidade, m.quantidade, m.custo_unitario
+                    FROM $from WHERE $where ORDER BY pat, cod_ativo, dt, o.numero", $prm);
+        csv_download('consumo_pecas_por_ot', ['Patrimônio', 'Código ativo', 'Equipamento', 'OT', 'Tipo', 'Área', 'Data', 'Código peça', 'Peça / material', 'Qtd', 'Unid.', 'Custo unit. (R$)', 'Total (R$)'],
+            array_map(fn($r) => [$r['pat'], $r['cod_ativo'], $r['equip'], $r['numero'], rotulo('tipo_ot', $r['tipo']), $r['area'] ? rotulo('area', $r['area']) : '', dt($r['dt']),
+                                 $r['art_codigo'], $r['art_desc'], num($r['quantidade'], 3), $r['unidade'], num($r['custo_unitario'], 4), num($r['quantidade'] * $r['custo_unitario'])], $itens));
+    }
+    $grupos = [];
+    foreach ($linhas as $l) $grupos[$l['eq']][] = $l;
+    $total = array_sum(array_column($linhas, 'custo'));
+    $qsC = fn(string $t) => '?' . http_build_query(['r' => 'relatorios/consumo', 'de' => $ini, 'ate' => $fim, 'ativo' => $ativoF ?: null, 'patrimonio' => $patF, 'artigo' => $artF ?: null, 'area' => $areaF ?: null, 'empresa' => $empF ?: null, 'csv' => $t]);
+    $empresas = array_column(q('SELECT DISTINCT empresa FROM ordens_trabalho WHERE empresa IS NOT NULL ORDER BY empresa'), 'empresa');
+
+    view_header('Consumo de peças por equipamento', 'relatorios'); ?>
+    <?php if ($avisoPeriodo): ?><div class="alert alert-warning"><?= e($avisoPeriodo) ?></div><?php endif; ?>
+    <div class="page-title"><h1>Consumo de peças por equipamento</h1>
+      <div class="d-flex gap-2 no-print"><a class="btn btn-outline-secondary btn-sm" href="<?= e(url('relatorios')) ?>">Relatórios</a>
+        <a class="btn btn-outline-primary btn-sm" href="<?= e($qsC('resumo')) ?>"><i class="bi bi-filetype-csv"></i> CSV resumo</a>
+        <a class="btn btn-outline-primary btn-sm" href="<?= e($qsC('itens')) ?>"><i class="bi bi-filetype-csv"></i> CSV por OT</a>
+        <button class="btn btn-outline-secondary btn-sm" data-print><i class="bi bi-printer"></i> Imprimir</button></div></div>
+    <form class="card card-body py-2 mb-3 no-print" method="get"><input type="hidden" name="r" value="relatorios/consumo"><div class="row g-2 align-items-end">
+      <div class="col-6 col-md-2"><label class="form-label" for="c_de">De</label><input type="date" class="form-control form-control-sm" id="c_de" name="de" value="<?= e($ini) ?>"></div>
+      <div class="col-6 col-md-2"><label class="form-label" for="c_ate">Até</label><input type="date" class="form-control form-control-sm" id="c_ate" name="ate" value="<?= e($fim) ?>"></div>
+      <div class="col-md-3"><label class="form-label" for="c_at">Ativo (inclui componentes)</label><?= sel('ativo', arvore_opcoes('ativos'), $ativoF ?: null, true, 'id="c_at" class="form-select form-select-sm"', 'Todos') ?></div>
+      <div class="col-6 col-md-2"><label class="form-label" for="c_pat">Cód. patrimônio</label><input class="form-control form-control-sm text-uppercase" id="c_pat" name="patrimonio" value="<?= e($patF) ?>" placeholder="C1.10.016"></div>
+      <div class="col-6 col-md-3"><label class="form-label" for="c_art">Peça / material</label><input class="form-control form-control-sm" id="c_art" name="artigo" value="<?= e($artF) ?>" placeholder="código ou descrição"></div>
+      <div class="col-6 col-md-2"><label class="form-label" for="c_area">Área</label><?= sel('area', lista_rotulos('area'), $areaF ?: null, true, 'id="c_area" class="form-select form-select-sm"', 'Todas') ?></div>
+      <div class="col-6 col-md-2"><label class="form-label" for="c_emp">Empresa</label><?= sel('empresa', array_combine($empresas, $empresas) ?: [], $empF ?: null, true, 'id="c_emp" class="form-select form-select-sm"', 'Todas') ?></div>
+      <div class="col-md-2"><button class="btn btn-sm btn-primary w-100">Atualizar</button></div></div></form>
+    <p class="small text-muted">Peças e materiais baixados do estoque nas OTs (preventivas e OMs), pela data de término da OT — ou de abertura, se ainda não concluída. Período: <?= dt($ini) ?> a <?= dt($fim) ?>. Total: <strong><?= moeda($total) ?></strong>.</p>
+    <?php foreach ($grupos as $g): $h = $g[0]; ?>
+      <div class="card mb-3"><div class="card-header bg-white d-flex justify-content-between flex-wrap gap-2">
+        <div><?= $h['pat'] ? '<span class="badge text-bg-dark me-1">' . e($h['pat']) . '</span>' : '<span class="badge text-bg-light me-1">sem patrimônio</span>' ?>
+          <?= $h['ativo_id'] ? '<a class="fw-semibold" href="' . e(url('ativos/ver', ['id' => $h['ativo_id'], 'tab' => 'pecas'])) . '">' . e($h['cod_ativo'] . ' · ' . $h['equip']) . '</a>' : '<span class="fw-semibold">' . e($h['equip'] ?: '(sem equipamento informado)') . '</span>' ?></div>
+        <div class="fw-semibold"><?= moeda(array_sum(array_column($g, 'custo'))) ?></div></div>
+        <div class="table-responsive"><table class="table table-sm mb-0"><thead><tr><th>Código</th><th>Peça / material</th><th class="text-end">Qtd</th><th class="text-end">OTs</th><th>Último</th><th class="text-end">Custo</th></tr></thead><tbody>
+        <?php foreach ($g as $r): ?><tr><td><?= e($r['art_codigo']) ?></td><td><?= e($r['art_desc']) ?></td><td class="text-end"><?= num($r['qtd'], 2) ?> <?= e($r['unidade']) ?></td><td class="text-end"><?= (int)$r['ots'] ?></td><td><?= dt($r['ultima']) ?></td><td class="text-end"><?= moeda($r['custo']) ?></td></tr><?php endforeach; ?>
+        </tbody></table></div></div>
+    <?php endforeach; if (!$grupos): ?><div class="alert alert-light border">Nenhuma peça baixada em OT com estes filtros.</div><?php endif; ?>
+    <?php view_footer(); exit;
+}
+
 $ids = $ativoF ? descendentes('ativos', $ativoF) : null;
 $fa = $ids ? ' AND o.ativo_id IN (' . implode(',', $ids) . ')' : '';
 $p = [$ini . ' 00:00:00', $fim . ' 23:59:59'];
@@ -48,6 +117,10 @@ $materiais = q("SELECT a.codigo, a.descricao, a.unidade, SUM(m.quantidade) qtd, 
 $porTipo = q("SELECT tipo, COUNT(*) n FROM ordens_trabalho o WHERE status='concluida' AND data_fim BETWEEN ? AND ? $fa GROUP BY tipo", $p);
 $semPlano = q("SELECT a.id, a.codigo, a.nome, a.criticidade FROM ativos a WHERE a.status <> 'desativado' AND a.criticidade IN ('A','B')
                AND NOT EXISTS (SELECT 1 FROM planos_manutencao p WHERE p.ativo_id=a.id AND p.ativo=1) ORDER BY a.criticidade, a.codigo LIMIT 30");
+// OMs (OTs sem plano) por área no período: abertas no período, concluídas e ainda pendentes
+$omsArea = q("SELECT COALESCE(o.area, '') area, COUNT(*) n, SUM(o.status = 'concluida') concl, SUM(o.status IN (" . STATUS_PENDENTES . ")) pend,
+                     AVG(CASE WHEN o.status = 'concluida' THEN DATEDIFF(o.data_fim, o.data_abertura) END) dias
+              FROM ordens_trabalho o WHERE o.plano_id IS NULL AND o.data_abertura BETWEEN ? AND ? $fa GROUP BY COALESCE(o.area, '') ORDER BY n DESC", $p);
 $backlog = q("SELECT o.tipo, COUNT(*) n, SUM(o.data_prevista < CURDATE()) atrasadas FROM ordens_trabalho o WHERE status IN (" . STATUS_PENDENTES . ") $fa GROUP BY o.tipo");
 
 if ($csv = get('csv')) {
@@ -67,7 +140,9 @@ $totalCausas = max(1, array_sum(array_column($causas, 'n')));
 
 view_header('Relatórios & KPIs', 'relatorios'); ?>
 <?php if ($avisoPeriodo): ?><div class="alert alert-warning"><?= e($avisoPeriodo) ?></div><?php endif; ?>
-<div class="page-title"><h1>Relatórios e indicadores</h1><button class="btn btn-outline-secondary btn-sm no-print" data-print><i class="bi bi-printer"></i> Imprimir</button></div>
+<div class="page-title"><h1>Relatórios e indicadores</h1><div class="d-flex gap-2 no-print">
+  <a class="btn btn-outline-primary btn-sm" href="<?= e(url('relatorios/consumo', ['de' => $ini, 'ate' => $fim, 'ativo' => $ativoF ?: null])) ?>"><i class="bi bi-box-seam"></i> Consumo de peças por equipamento</a>
+  <button class="btn btn-outline-secondary btn-sm" data-print><i class="bi bi-printer"></i> Imprimir</button></div></div>
 <form class="card card-body py-2 mb-3 no-print" method="get"><input type="hidden" name="r" value="relatorios"><div class="row g-2 align-items-end">
   <div class="col-md-2"><label class="form-label">De</label><input type="date" class="form-control form-control-sm" name="de" value="<?= e($ini) ?>"></div>
   <div class="col-md-2"><label class="form-label">Até</label><input type="date" class="form-control form-control-sm" name="ate" value="<?= e($fim) ?>"></div>
@@ -124,8 +199,14 @@ view_header('Relatórios & KPIs', 'relatorios'); ?>
     <?php if (!$tecnicos): ?><tr><td colspan="4" class="text-muted text-center">Sem apontamentos.</td></tr><?php endif; ?></tbody></table></div></div>
 </div>
 
+<div class="card mb-3"><div class="card-header bg-white fw-semibold d-flex justify-content-between">OMs (não preventivas) abertas no período, por área
+  <a class="small no-print" href="<?= e(url('ots', ['f' => 'todas', 'origem' => 'om', 'de' => $ini, 'ate' => $fim])) ?>">ver OMs</a></div>
+  <table class="table table-sm mb-0"><thead><tr><th>Área</th><th class="text-end">OMs</th><th class="text-end">Concluídas</th><th class="text-end">Pendentes</th><th class="text-end">Prazo médio (dias)</th></tr></thead><tbody>
+  <?php foreach ($omsArea as $oa): ?><tr><td><?= $oa['area'] !== '' ? e(rotulo('area', $oa['area'])) : '<span class="text-muted">não informada</span>' ?></td><td class="text-end"><?= (int)$oa['n'] ?></td><td class="text-end"><?= (int)$oa['concl'] ?></td><td class="text-end <?= $oa['pend'] ? 'text-warning' : '' ?>"><?= (int)$oa['pend'] ?></td><td class="text-end"><?= $oa['dias'] !== null ? num($oa['dias'], 1) : '—' ?></td></tr><?php endforeach; ?>
+  <?php if (!$omsArea): ?><tr><td colspan="5" class="text-muted text-center">Nenhuma OM aberta no período.</td></tr><?php endif; ?></tbody></table></div>
+
 <div class="row g-3">
-  <div class="col-lg-6"><div class="card h-100"><div class="card-header bg-white fw-semibold d-flex justify-content-between">Consumo de materiais (top 20) <a class="small no-print" href="<?= e($qs('materiais')) ?>">CSV</a></div>
+  <div class="col-lg-6"><div class="card h-100"><div class="card-header bg-white fw-semibold d-flex justify-content-between">Consumo de materiais (top 20) <span class="small no-print"><a href="<?= e(url('relatorios/consumo', ['de' => $ini, 'ate' => $fim, 'ativo' => $ativoF ?: null])) ?>">por equipamento</a> · <a href="<?= e($qs('materiais')) ?>">CSV</a></span></div>
     <table class="table table-sm mb-0"><thead><tr><th>Artigo</th><th class="text-end">Qtd</th><th class="text-end">Custo</th></tr></thead><tbody>
     <?php foreach ($materiais as $m): ?><tr><td><?= e($m['codigo'] . ' · ' . $m['descricao']) ?></td><td class="text-end"><?= num($m['qtd'], 2) ?> <?= e($m['unidade']) ?></td><td class="text-end"><?= moeda($m['custo']) ?></td></tr><?php endforeach; ?>
     <?php if (!$materiais): ?><tr><td colspan="3" class="text-muted text-center">Sem consumo.</td></tr><?php endif; ?></tbody></table></div></div>

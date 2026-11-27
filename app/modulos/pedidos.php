@@ -64,6 +64,10 @@ if ($acao === 'avaliar' && is_post()) {
                 'titulo' => $p['titulo'], 'descricao' => trim(($p['descricao'] ?? '') . ($resposta ? "\n\n[Gestor] $resposta" : '')),
                 'responsavel_id' => $resp, 'data_prevista' => post_date('data_prevista') ?? date('Y-m-d'),
                 'ativo_parado' => $p['ativo_parado'], 'criado_por' => $u['id'],
+                'area' => array_key_exists((string)post('area'), ROTULOS['area']) ? post('area') : null,
+                'empresa' => trim((string)cfg('empresa')) ?: null,
+                'solicitante' => mb_substr((string)qv('SELECT nome FROM usuarios WHERE id = ?', [$p['solicitante_id']]), 0, 100) ?: null,
+                'patrimonio' => $p['ativo_id'] ? qv('SELECT patrimonio FROM ativos WHERE id = ?', [$p['ativo_id']]) : null,
             ]);
             update('pedidos', ['status' => 'convertido', 'ot_id' => $otId, 'resposta' => $resposta, 'avaliado_por' => $u['id'], 'avaliado_em' => date('Y-m-d H:i:s')], $pid);
         }
@@ -137,6 +141,7 @@ if ($acao === 'ver') {
           <div class="row g-2">
             <div class="col-6"><label class="form-label">Tipo da OT</label><?= sel('tipo', lista_rotulos('tipo_ot'), 'corretiva', false) ?></div>
             <div class="col-6"><label class="form-label">Prioridade</label><?= sel('prioridade', lista_rotulos('prioridade'), $p['prioridade'], false) ?></div>
+            <div class="col-6"><label class="form-label" for="av_area">Área</label><?= sel('area', lista_rotulos('area'), null, true, 'id="av_area"', '— não informada —') ?></div>
             <div class="col-6"><label class="form-label">Responsável</label><?= sel('responsavel_id', opcoes('SELECT id, nome FROM tecnicos WHERE ativo=1 ORDER BY nome')) ?></div>
             <div class="col-6"><label class="form-label">Data prevista</label><input type="date" class="form-control" name="data_prevista" value="<?= date('Y-m-d') ?>"></div>
             <div class="col-12"><label class="form-label">Comentário / resposta ao solicitante <span class="text-muted fw-normal">(obrigatório para rejeitar)</span></label><textarea class="form-control" name="resposta" rows="2"><?= e((string)old('resposta', '')) ?></textarea></div>
