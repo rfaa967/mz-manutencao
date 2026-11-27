@@ -29,7 +29,8 @@ function config_reautenticar(): ?string
     $email = mb_strtolower((string)$u['email']);
     if (login_bloqueado($email)) return 'Muitas tentativas. Aguarde 15 minutos.';
     if (!password_verify((string)($_POST['senha_confirmacao'] ?? ''), (string)$u['senha_hash'])) {
-        insert('login_falhas', ['email' => $email, 'ip' => ip_cliente()]);
+        insert('login_falhas', ['email' => $email, 'ip' => ip_chave()]);
+        usleep(300000);
         auditar('reauth_falha', 'configuracoes');
         return 'Confirme sua senha atual para alterar esta seção.';
     }
@@ -73,9 +74,10 @@ if (is_post() && in_array($acao, ['importar_analisar', 'importar_aplicar', 'impo
             $f = $_FILES['arquivo'] ?? null;
             $errUp = is_array($f) ? (int)($f['error'] ?? UPLOAD_ERR_NO_FILE) : UPLOAD_ERR_NO_FILE;
             if ($errUp === UPLOAD_ERR_INI_SIZE || $errUp === UPLOAD_ERR_FORM_SIZE) throw new RuntimeException('Arquivo maior que o limite do servidor (' . ini_get('upload_max_filesize') . '). Envie o .zip gerado pelo exportador, que é bem menor que o .mdb.');
-            if ($errUp !== UPLOAD_ERR_OK || !is_uploaded_file((string)$f['tmp_name'])) throw new RuntimeException('Selecione o arquivo exportado do ManWinWin (.zip ou .mdb).');
+            if ($errUp !== UPLOAD_ERR_OK || !is_uploaded_file((string)$f['tmp_name'])) throw new RuntimeException('Selecione o arquivo exportado do ManWinWin (.zip).');
             $ext = strtolower(pathinfo((string)$f['name'], PATHINFO_EXTENSION));
-            if (!in_array($ext, ['zip', 'mdb', 'accdb'], true)) throw new RuntimeException('Envie o .zip gerado pelo exportador ou o arquivo .mdb do ManWinWin.');
+            // o .mdb só é lido pelo terminal (tools/importar_manwinwin.php): um .mdb corrompido derruba o conversor
+            if ($ext !== 'zip') throw new RuntimeException('Envie o .zip gerado pelo exportador (tools/manwinwin). O arquivo .mdb não é aceito por aqui.');
             if (!is_dir($dirImp) && !@mkdir($dirImp, 0770, true)) throw new RuntimeException('Não foi possível criar storage/importacoes (verifique a permissão da pasta storage/).');
             foreach (glob($dirImp . '/*') ?: [] as $velho) if (is_file($velho) && filemtime($velho) < time() - 86400) @unlink($velho);   // simulações esquecidas
             $destino = $dirImp . '/' . bin2hex(random_bytes(16)) . '.' . $ext;
@@ -84,6 +86,8 @@ if (is_post() && in_array($acao, ['importar_analisar', 'importar_aplicar', 'impo
             $_SESSION['importacao'] = ['arquivo' => $destino, 'ext' => $ext, 'nome' => mb_substr(basename(str_replace('\\', '/', (string)$f['name'])), 0, 120),
                                        'opcoes' => $opcoes, 'hash' => hash_file('sha256', $destino), 'em' => time()];
             $rel = (new ImportadorManWinWin(mww_ler_arquivo($destino, "arquivo.$ext"), $opcoes, (int)usuario()['id']))->executar(false);
+            foreach (['ignorados', 'avisos', 'planos_inativos'] as $lk) if (isset($rel[$lk])) $rel[$lk] = array_slice($rel[$lk], 0, 500);   // sessão enxuta
+            foreach ($rel['novos'] as $nk => $nv) $rel['novos'][$nk] = array_slice($nv, 0, 500);
             $_SESSION['importacao']['relatorio'] = $rel;
         } else {
             $s = $_SESSION['importacao'] ?? null;
@@ -131,19 +135,24 @@ if (is_post() && in_array($acao, ['importar_om_analisar', 'importar_om_aplicar',
             if (count($nomes) > 12) throw new RuntimeException('Envie no máximo 12 planilhas por vez.');
             if (!is_dir($dirImp) && !@mkdir($dirImp, 0770, true)) throw new RuntimeException('Não foi possível criar storage/importacoes (verifique a permissão da pasta storage/).');
             foreach (glob($dirImp . '/*') ?: [] as $velho) if (is_file($velho) && filemtime($velho) < time() - 86400) @unlink($velho);
+            foreach ($nomes as $i => $nomeOrig) {   // valida todos antes de gravar o primeiro (não deixa arquivo órfão)
+                if (!is_string($nomeOrig) || strtolower(pathinfo($nomeOrig, PATHINFO_EXTENSION)) !== 'xlsx') throw new RuntimeException((is_string($nomeOrig) ? $nomeOrig : 'Arquivo') . ': envie planilhas do Excel (.xlsx). Se estiver em .xls, abra no Excel e salve como .xlsx.');
+            }
             $arquivos = [];
+            $_SESSION['importacao_om'] = ['arquivos' => &$arquivos];   // já registrados: um erro no meio apaga os que foram gravados
             foreach ($nomes as $i => $nomeOrig) {
                 $err = (int)($fs['error'][$i] ?? UPLOAD_ERR_NO_FILE);
                 if ($err === UPLOAD_ERR_INI_SIZE || $err === UPLOAD_ERR_FORM_SIZE) throw new RuntimeException("$nomeOrig: maior que o limite do servidor (" . ini_get('upload_max_filesize') . ').');
                 if ($err !== UPLOAD_ERR_OK || !is_uploaded_file((string)$fs['tmp_name'][$i])) throw new RuntimeException("Falha no envio de $nomeOrig.");
-                if (strtolower(pathinfo((string)$nomeOrig, PATHINFO_EXTENSION)) !== 'xlsx') throw new RuntimeException("$nomeOrig: envie planilhas do Excel (.xlsx). Se estiver em .xls, abra no Excel e salve como .xlsx.");
                 $destino = $dirImp . '/' . bin2hex(random_bytes(16)) . '.xlsx';
                 if (!move_uploaded_file((string)$fs['tmp_name'][$i], $destino)) throw new RuntimeException('Não foi possível salvar o arquivo enviado (verifique a permissão da pasta storage/).');
                 $arquivos[] = ['caminho' => $destino, 'nome' => mb_substr(basename(str_replace('\\', '/', (string)$nomeOrig)), 0, 120), 'hash' => hash_file('sha256', $destino)];
             }
-            $_SESSION['importacao_om'] = ['arquivos' => $arquivos, 'em' => time(), 'hash' => hash('sha256', implode('|', array_column($arquivos, 'hash')))];
+            unset($_SESSION['importacao_om']);
+            $_SESSION['importacao_om'] = ['arquivos' => array_values($arquivos), 'em' => time(), 'hash' => hash('sha256', implode('|', array_column($arquivos, 'hash')))];
             $rel = (new ImportadorPlanilhasOM($arquivos, (int)usuario()['id']))->executar(false);
-            if (count($rel['novos']['ordens_trabalho'] ?? []) > 300) $rel['novos']['ordens_trabalho'] = array_slice($rel['novos']['ordens_trabalho'], 0, 300);   // sessão enxuta
+            foreach (['ignorados', 'avisos', 'alterados'] as $lk) $rel[$lk] = array_slice($rel[$lk] ?? [], 0, 300);   // sessão enxuta
+            foreach ($rel['novos'] as $nk => $nv) $rel['novos'][$nk] = array_slice($nv, 0, 300);
             $_SESSION['importacao_om']['relatorio'] = $rel;
         } else {
             $s = $_SESSION['importacao_om'] ?? null;
@@ -338,11 +347,12 @@ function cfg_segredo(string $k): string
          . ($definido ? '<div class="form-check mt-1"><input class="form-check-input" type="checkbox" id="c_' . $nome . '_ap" name="' . $nome . '__apagar" value="1"><label class="form-check-label small" for="c_' . $nome . '_ap">apagar a senha/chave salva</label></div>' : '');
 }
 
-function cfg_reauth(string $aba): string
+function cfg_reauth(string $aba, string $sufixo = ''): string
 {
     if ((!in_array($aba, CONFIG_ABAS_SENSIVEIS, true) && $aba !== 'migrar') || ($_SESSION['reauth_ate'] ?? 0) > time()) return '';
-    return '<div class="col-md-6"><label class="form-label" for="senha_confirmacao">Sua senha atual <span class="text-danger">*</span></label>'
-         . '<input type="password" class="form-control" id="senha_confirmacao" name="senha_confirmacao" required autocomplete="current-password">'
+    $id = 'senha_confirmacao' . $sufixo;   // sufixo: mais de um formulário com senha na mesma tela (ids únicos)
+    return '<div class="col-md-6"><label class="form-label" for="' . $id . '">Sua senha atual <span class="text-danger">*</span></label>'
+         . '<input type="password" class="form-control" id="' . $id . '" name="senha_confirmacao" required autocomplete="current-password">'
          . '<div class="form-text">Por segurança, confirme sua senha para alterar esta seção (vale por 15 minutos).</div></div>';
 }
 
@@ -481,10 +491,10 @@ view_header('Configurações', 'configuracoes');
   <?php endif; ?>
   <div class="d-flex flex-wrap gap-2 align-items-end mt-3">
     <?php if (array_sum($rel['criados'])): ?>
-    <form method="post" action="<?= e(url('configuracoes/importar_aplicar')) ?>" class="d-flex flex-wrap gap-2 align-items-end"><?= csrf_field() ?>
+    <form method="post" action="<?= e(url('configuracoes/importar_aplicar')) ?>" class="row g-2 align-items-end flex-grow-1"><?= csrf_field() ?>
       <input type="hidden" name="hash" value="<?= e($imp['hash']) ?>">
-      <?= cfg_reauth('migrar') ?>
-      <div><button class="btn btn-primary" data-confirm="Gravar a importação agora? Faça backup do banco antes."><i class="bi bi-database-add"></i> Importar agora</button></div>
+      <?= cfg_reauth('migrar', '_mww_ap') ?>
+      <div class="col-auto"><button class="btn btn-primary" data-confirm="Gravar a importação agora? Faça backup do banco antes."><i class="bi bi-database-add"></i> Importar agora</button></div>
     </form>
     <?php endif; ?>
     <form method="post" action="<?= e(url('configuracoes/importar_cancelar')) ?>"><?= csrf_field() ?><button class="btn btn-outline-secondary">Descartar</button></form>
@@ -497,7 +507,7 @@ view_header('Configurações', 'configuracoes');
   <h2 class="h6"><i class="bi bi-clipboard-check"></i> Simulação das planilhas de OM <span class="badge text-bg-secondary">nada foi gravado ainda</span></h2>
   <p class="small text-muted mb-2"><?= e(implode(' · ', array_column($om['arquivos'], 'nome'))) ?></p>
   <ul class="small mb-2">
-    <li><strong><?= (int)($relOm['criados']['ordens_trabalho'] ?? 0) ?></strong> OMs novas<?= !empty($relOm['existentes']['ordens_trabalho']) ? ' · ' . (int)$relOm['existentes']['ordens_trabalho'] . ' já importadas antes' : '' ?>
+    <li><strong><?= (int)($relOm['criados']['ordens_trabalho'] ?? 0) ?></strong> OMs novas<?= !empty($relOm['atualizados']['ordens_trabalho']) ? ' · <strong>' . (int)$relOm['atualizados']['ordens_trabalho'] . '</strong> já importadas que serão atualizadas (ganharam início/término na planilha)' : '' ?><?= !empty($relOm['existentes']['ordens_trabalho']) ? ' · ' . (int)$relOm['existentes']['ordens_trabalho'] . ' já importadas, sem mudança' : '' ?>
       <?php if ($st = $relOm['resumo']['status'] ?? []): ?>(<?= e(implode(', ', array_map(fn($k, $v) => mb_strtolower(rotulo('ot_status', $k)) . " $v", array_keys($st), $st))) ?>)<?php endif; ?></li>
     <?php if ($ar = $relOm['resumo']['area'] ?? []): ?><li>Por área: <?= e(implode(', ', array_map(fn($k, $v) => ($k ? rotulo('area', $k) : 'sem área') . " $v", array_keys($ar), $ar))) ?></li><?php endif; ?>
     <li><?= (int)($relOm['criados']['tecnicos'] ?? 0) ?> técnico(s) novo(s)<?= !empty($relOm['novos']['tecnicos']) ? ': ' . e(implode(', ', $relOm['novos']['tecnicos'])) : '' ?></li>
@@ -507,12 +517,16 @@ view_header('Configurações', 'configuracoes');
   <?php if (!empty($relOm['novos']['ordens_trabalho'])): ?>
     <details class="small mb-1"><summary>OMs a criar (<?= (int)($relOm['criados']['ordens_trabalho'] ?? 0) ?><?= ($relOm['criados']['ordens_trabalho'] ?? 0) > 300 ? ', mostrando 300' : '' ?>)</summary><ul class="mb-1"><?php foreach ($relOm['novos']['ordens_trabalho'] as $i): ?><li><?= e($i) ?></li><?php endforeach; ?></ul></details>
   <?php endif; ?>
+  <?php if (!empty($relOm['alterados'])): ?>
+    <details class="small mb-1"><summary>OMs a atualizar (<?= (int)($relOm['atualizados']['ordens_trabalho'] ?? 0) ?>)</summary><ul class="mb-1"><?php foreach ($relOm['alterados'] as $i): ?><li><?= e($i) ?></li><?php endforeach; ?></ul></details>
+  <?php endif; ?>
   <?php if ($relOm['ignorados']): ?><details class="small mb-1"><summary>Linhas ignoradas (<?= count($relOm['ignorados']) ?>)</summary><ul class="mb-1"><?php foreach ($relOm['ignorados'] as [$t, $i, $m]): ?><li><?= e($i) ?> — <?= e($m) ?></li><?php endforeach; ?></ul></details><?php endif; ?>
   <div class="d-flex flex-wrap gap-2 align-items-end mt-3">
-    <?php if (!empty($relOm['criados']['ordens_trabalho'])): ?>
-    <form method="post" action="<?= e(url('configuracoes/importar_om_aplicar')) ?>" class="d-flex flex-wrap gap-2 align-items-end"><?= csrf_field() ?>
-      <input type="hidden" name="hash" value="<?= e($om['hash']) ?>"><?= cfg_reauth('migrar') ?>
-      <div><button class="btn btn-primary" data-confirm="Gravar as OMs agora? Faça backup do banco antes."><i class="bi bi-database-add"></i> Importar agora</button></div></form>
+    <?php $nOm = (int)($relOm['criados']['ordens_trabalho'] ?? 0); $nAt = (int)($relOm['atualizados']['ordens_trabalho'] ?? 0); if ($nOm || $nAt): ?>
+    <form method="post" action="<?= e(url('configuracoes/importar_om_aplicar')) ?>" class="row g-2 align-items-end flex-grow-1"><?= csrf_field() ?>
+      <input type="hidden" name="hash" value="<?= e($om['hash']) ?>"><?= cfg_reauth('migrar', '_om_ap') ?>
+      <div class="col-auto"><button class="btn btn-primary" data-confirm="Gravar agora: <?= $nOm ?> OM(s) nova(s) e <?= $nAt ?> atualizada(s)? Faça backup do banco antes."><i class="bi bi-database-add"></i> Importar agora</button></div></form>
+    <?php else: ?><p class="text-muted small mb-0 me-2">Nada novo nestas planilhas: tudo já foi importado.</p>
     <?php endif; ?>
     <form method="post" action="<?= e(url('configuracoes/importar_om_cancelar')) ?>"><?= csrf_field() ?><button class="btn btn-outline-secondary">Descartar</button></form>
   </div>
@@ -521,12 +535,13 @@ view_header('Configurações', 'configuracoes');
 
 <div class="card mb-3"><div class="card-body">
   <h2 class="h6"><i class="bi bi-file-earmark-spreadsheet"></i> Importar planilhas de OM (Excel)</h2>
-  <p class="small text-muted mb-2">As planilhas de controle de OM — mecânica (OMM), elétrica (OME) e civil (OMC/SMC), uma aba por mês. Cada linha vira uma OM; a área vem do nome do arquivo, a situação das datas (término = concluída). A mesma SM repetida em vários meses entra uma vez, com a situação mais recente. Pode reenviar as planilhas atualizadas depois: só as linhas novas entram.</p>
+  <p class="small text-muted mb-2">As planilhas de controle de OM — mecânica (OMM), elétrica (OME) e civil (OMC/SMC), uma aba por mês. Cada linha vira uma OM; a área vem do nome do arquivo, a situação das datas (término = concluída). A mesma SM copiada de um mês para o outro entra uma vez. Pode reenviar as planilhas atualizadas: entram as linhas novas, e as OMs que estavam pendentes e ganharam data de término são concluídas; o que já foi encerrado ou editado aqui não é alterado.</p>
   <form method="post" action="<?= e(url('configuracoes/importar_om_analisar')) ?>" enctype="multipart/form-data" class="row g-3 align-items-end"><?= csrf_field() ?>
     <div class="col-md-7"><label class="form-label" for="imp_om">Planilhas (.xlsx, pode selecionar várias)</label>
       <input type="file" class="form-control" id="imp_om" name="planilhas[]" accept=".xlsx" multiple required></div>
-    <?= cfg_reauth('migrar') ?>
-    <div class="col-auto"><button class="btn btn-outline-primary" <?= $mapaOk ? '' : 'disabled' ?>><i class="bi bi-search"></i> Enviar e simular</button></div>
+    <div class="col-md-5 form-text">Limite do servidor: <?= e(ini_get('upload_max_filesize')) ?> por arquivo.</div>
+    <?= cfg_reauth('migrar', '_om') ?>
+    <div class="col-12"><button class="btn btn-outline-primary" <?= $mapaOk ? '' : 'disabled' ?>><i class="bi bi-search"></i> Enviar e simular</button></div>
   </form>
 </div></div>
 
@@ -537,14 +552,14 @@ view_header('Configurações', 'configuracoes');
     <form method="post" action="<?= e(url('configuracoes/importar_analisar')) ?>" enctype="multipart/form-data"><?= csrf_field() ?>
       <div class="row g-3">
         <div class="col-12"><label class="form-label" for="imp_arquivo">Arquivo exportado do ManWinWin</label>
-          <input type="file" class="form-control" id="imp_arquivo" name="arquivo" accept=".zip,.mdb,.accdb" required>
-          <div class="form-text">.zip gerado pelo exportador (recomendado)<?= mww_mdbtools() ? ' ou o próprio ManWinWin.mdb' : '' ?>. Limite do servidor: <?= e(ini_get('upload_max_filesize')) ?>.</div></div>
+          <input type="file" class="form-control" id="imp_arquivo" name="arquivo" accept=".zip" required>
+          <div class="form-text">O .zip gerado pelo exportador (o .mdb não é aceito por aqui). Limite do servidor: <?= e(ini_get('upload_max_filesize')) ?>.</div></div>
         <div class="col-12">
           <div class="form-check"><input class="form-check-input" type="checkbox" name="incluir_artigos" value="1" id="imp_art"><label class="form-check-label" for="imp_art">Importar também o catálogo de artigos (peças) e os saldos de estoque</label>
             <div class="form-text">Desmarcado por padrão: o catálogo que vem com o ManWinWin é genérico (pneus, lâmpadas, extintores…).</div></div>
           <div class="form-check"><input class="form-check-input" type="checkbox" name="incluir_modelo" value="1" id="imp_mod"><label class="form-check-label" for="imp_mod">Incluir os equipamentos de exemplo "Modelo" do ManWinWin</label></div>
         </div>
-        <?= cfg_reauth('migrar') ?>
+        <?= cfg_reauth('migrar', '_mww') ?>
         <div class="col-12"><button class="btn btn-outline-primary" <?= $mapaOk ? '' : 'disabled' ?>><i class="bi bi-search"></i> Enviar e simular</button></div>
       </div>
     </form>
@@ -576,7 +591,7 @@ view_header('Configurações', 'configuracoes');
     $exts = ['pdo_mysql', 'mbstring', 'fileinfo', 'openssl', 'gd', 'json', 'session'];
     $cronTxt = function (string $arq, int $toleranciaSeg): string {
         $t = @filemtime(APP_ROOT . "/storage/$arq");
-        if (!$t) return '<span class="text-warning">nunca rodou</span>';
+        if (!$t) return '<span class="text-danger fw-semibold">nunca rodou</span>';
         return '<span class="' . (time() - $t > $toleranciaSeg ? 'text-danger' : 'text-success') . '">' . e(date('d/m/Y H:i', $t)) . '</span>';
     };
 ?>

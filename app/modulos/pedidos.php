@@ -68,6 +68,8 @@ if ($acao === 'avaliar' && is_post()) {
                 'empresa' => trim((string)cfg('empresa')) ?: null,
                 'solicitante' => mb_substr((string)qv('SELECT nome FROM usuarios WHERE id = ?', [$p['solicitante_id']]), 0, 100) ?: null,
                 'patrimonio' => $p['ativo_id'] ? qv('SELECT patrimonio FROM ativos WHERE id = ?', [$p['ativo_id']]) : null,
+                // pedido sem ativo: o local informado identifica onde é o trabalho
+                'equipamento' => !$p['ativo_id'] && $p['localizacao_id'] ? (mb_substr(caminho_localizacao((int)$p['localizacao_id']), 0, 150) ?: null) : null,
             ]);
             update('pedidos', ['status' => 'convertido', 'ot_id' => $otId, 'resposta' => $resposta, 'avaliado_por' => $u['id'], 'avaliado_em' => date('Y-m-d H:i:s')], $pid);
         }

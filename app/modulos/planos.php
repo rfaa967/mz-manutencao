@@ -16,7 +16,11 @@ if ($acao === 'gerar' && is_post()) {
 }
 if ($acao === 'gerar_um' && is_post()) {
     exigir('gerir');
-    $p = q1('SELECT * FROM planos_manutencao WHERE id = ?', [post_int('id')]);
+    $p = q1("SELECT p.*, a.status AS ativo_status FROM planos_manutencao p JOIN ativos a ON a.id = p.ativo_id WHERE p.id = ?", [post_int('id')]);
+    if ($p && (!$p['ativo'] || $p['ativo_status'] === 'desativado')) {
+        flash(!$p['ativo'] ? 'Este plano está inativo. Ative-o antes de gerar a OT.' : 'O ativo deste plano está desativado.', 'warning');
+        redirect('planos/form', ['id' => $p['id']]);
+    }
     $ot = $p ? gerar_ot_de_plano($p, $p['gatilho'] === 'tempo' ? ($p['proxima_data'] ?: date('Y-m-d')) : date('Y-m-d'), usuario()['id']) : null;
     if ($ot) {
         flash('OT gerada a partir do plano.');
@@ -32,7 +36,7 @@ if ($acao === 'salvar' && is_post()) {
     $id = post_int('id');
     $gat = post('gatilho') === 'contador' ? 'contador' : 'tempo';
     $dados = [
-        'ativo_id' => post_int('ativo_id'), 'titulo' => (string)post('titulo'),
+        'ativo_id' => post_int('ativo_id'), 'titulo' => mb_substr((string)post('titulo'), 0, 150),
         'tipo' => array_key_exists((string)post('tipo'), $tiposPlano) ? post('tipo') : 'preventiva',
         'descricao' => post('descricao') ?: null, 'gatilho' => $gat,
         'base_calculo' => post('base_calculo') === 'conclusao' ? 'conclusao' : 'fixa',
@@ -44,7 +48,7 @@ if ($acao === 'salvar' && is_post()) {
         'periodicidade' => null, 'unidade_periodo' => null, 'proxima_data' => null, 'contador_id' => null, 'intervalo_contador' => null, 'proximo_valor' => null,
     ];
     if ($gat === 'tempo') {
-        $dados['periodicidade'] = max(1, (int)post('periodicidade'));
+        $dados['periodicidade'] = min(3650, max(1, (int)post('periodicidade')));
         $dados['unidade_periodo'] = array_key_exists((string)post('unidade_periodo'), $unidades) ? post('unidade_periodo') : 'mes';
         $dados['proxima_data'] = post_date('proxima_data') ?? date('Y-m-d');
         $ant = $id ? q1('SELECT proxima_data, dia_ancora FROM planos_manutencao WHERE id = ?', [$id]) : null;
@@ -65,19 +69,32 @@ if ($acao === 'salvar' && is_post()) {
     }
     if (!$dados['ativo_id'] || $dados['titulo'] === '') { flash('Ativo e título são obrigatórios.', 'danger'); redirect('planos/form', $id ? ['id' => $id] : []); }
 
+    $erroForm = function (string $msg) use ($id, $dados): never { flash($msg, 'danger'); redirect('planos/form', $id ? ['id' => $id] : ['ativo' => $dados['ativo_id']]); };
+    if (!qv('SELECT 1 FROM ativos WHERE id = ?', [$dados['ativo_id']])) $erroForm('Ativo inválido.');
+    if ($dados['responsavel_id'] && !qv('SELECT 1 FROM tecnicos WHERE id = ?', [$dados['responsavel_id']])) $erroForm('Responsável inválido.');
+    if ($gat === 'contador' && !qv('SELECT 1 FROM contadores WHERE id = ? AND ativo_id = ?', [$dados['contador_id'], $dados['ativo_id']])) $erroForm('Escolha um contador deste ativo.');
+    if (($dados['duracao_estimada'] ?? 0) > 9999 || ($dados['intervalo_contador'] ?? 0) > 999999999999 || ($dados['proximo_valor'] ?? 0) > 999999999999) $erroForm('Valor fora do limite permitido.');
+
     db()->beginTransaction();
+    try {
     if ($id) update('planos_manutencao', $dados, $id); else $id = insert('planos_manutencao', $dados);
     qx('DELETE FROM plano_tarefas WHERE plano_id = ?', [$id]);
-    foreach ((array)post('tarefa', []) as $i => $t) {
-        if (trim((string)$t) !== '') insert('plano_tarefas', ['plano_id' => $id, 'ordem' => $i + 1, 'descricao' => trim((string)$t)]);
+    $n = 0;
+    foreach (post_lista('tarefa') as $t) {
+        if (is_string($t) && trim($t) !== '') insert('plano_tarefas', ['plano_id' => $id, 'ordem' => ++$n, 'descricao' => mb_substr(trim($t), 0, 255)]);
     }
     qx('DELETE FROM plano_materiais WHERE plano_id = ?', [$id]);
-    $arts = (array)post('mat_artigo', []); $qtds = (array)post('mat_qtd', []);
+    $arts = (array)($_POST['mat_artigo'] ?? []); $qtds = (array)($_POST['mat_qtd'] ?? []);
     foreach ($arts as $i => $aid) {
         $qv = (float)(dec_br($qtds[$i] ?? null) ?? 0);
-        if ((int)$aid && $qv > 0) insert('plano_materiais', ['plano_id' => $id, 'artigo_id' => (int)$aid, 'quantidade' => $qv]);
+        if (is_scalar($aid) && (int)$aid && $qv > 0) insert('plano_materiais', ['plano_id' => $id, 'artigo_id' => (int)$aid, 'quantidade' => $qv]);
     }
     db()->commit();
+    } catch (PDOException $ex) {
+        if (db()->inTransaction()) db()->rollBack();
+        error_log('[MZManut] plano: ' . $ex->getMessage());
+        $erroForm('Dados inválidos ou fora do limite permitido (confira materiais e valores).');
+    }
     auditar('salvar', 'planos_manutencao', $id);
     flash('Plano salvo.');
     redirect('planos/form', ['id' => $id]);

@@ -22,6 +22,20 @@
     if (msg && !confirm(msg)) ev.preventDefault();
   });
 
+  /* ---------- Envio de arquivo: avisa que está enviando e evita duplo clique ---------- */
+  document.addEventListener('submit', function (ev) {
+    if (ev.defaultPrevented) return;
+    var f = ev.target;
+    if (!f.querySelector || !f.querySelector('input[type=file]')) return;
+    var b = ev.submitter || f.querySelector('button:not([type=button])');
+    if (!b || b.dataset.enviando) return;
+    b.dataset.enviando = '1'; b.dataset.rotulo = b.innerHTML;
+    setTimeout(function () { b.disabled = true; b.textContent = 'Enviando… aguarde'; }, 0);
+  });
+  window.addEventListener('pageshow', function () {   // voltou sem concluir (falha de rede, botão Voltar): libera o botão
+    [].forEach.call(document.querySelectorAll('button[data-enviando]'), function (b) { b.disabled = false; b.innerHTML = b.dataset.rotulo || b.innerHTML; delete b.dataset.enviando; });
+  });
+
   /* ---------- data-auto-submit: envia o formulário ao mudar ---------- */
   document.addEventListener('change', function (ev) {
     var el = ev.target.closest('[data-auto-submit]');

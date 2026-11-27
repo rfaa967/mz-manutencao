@@ -6,7 +6,7 @@ if ($acao === 'salvar' && is_post()) {
     exigir('gerir');
     $nome = mb_substr((string)post('nome'), 0, 80);
     $ini = post_dec_pos('valor_atual') ?? 0;
-    if (!$ativoId || !qv('SELECT 1 FROM ativos WHERE id = ?', [$ativoId]) || $nome === '' || dec_invalido('valor_atual')) {
+    if (!$ativoId || !qv('SELECT 1 FROM ativos WHERE id = ?', [$ativoId]) || $nome === '' || dec_invalido('valor_atual') || $ini > 999999999999) {
         flash('Informe o nome e um valor inicial válido.', 'danger');
     } else {
         db()->beginTransaction();
@@ -94,7 +94,7 @@ if ($acao === 'excluir' && is_post()) {
 $lista = q('SELECT c.*, a.codigo, a.nome AS ativo FROM contadores c JOIN ativos a ON a.id=c.ativo_id ' . ($ativoId ? 'WHERE c.ativo_id = ' . $ativoId : '') . ' ORDER BY a.codigo, c.nome');
 view_header('Contadores', 'contadores'); ?>
 <div class="page-title"><h1>Contadores e leituras</h1></div>
-<form method="get" class="mb-3" style="max-width:480px"><input type="hidden" name="r" value="contadores"><?= sel('ativo', arvore_opcoes('ativos'), $ativoId ?: null, true, 'data-auto-submit') ?></form>
+<form method="get" class="mb-3" style="max-width:480px"><input type="hidden" name="r" value="contadores"><?= sel('ativo', arvore_opcoes('ativos'), $ativoId ?: null, true, 'data-auto-submit aria-label="Ativo"') ?></form>
 
 <?php if ($ativoId && pode('gerir')): ?>
 <div class="card mb-3"><div class="card-body">

@@ -33,3 +33,12 @@
 
 .m-lista .badge { align-self: flex-start; white-space: nowrap; }
 .m-lista .d-flex { align-items: flex-start; }
+
+/* alvos de toque (mínimo 44px) */
+.m-main .btn, .m-main .form-control, .m-main .form-select { min-height: 44px; }
+.m-main .form-check:not(.form-switch) .form-check-input { width: 1.4rem; height: 1.4rem; }
+.m-main .form-switch { padding-left: 3.4rem; }
+.m-main .form-switch .form-check-input { width: 2.8rem; height: 1.5rem; margin-left: -3.4rem; }
+.m-main .form-check-label { padding: .2rem 0 0 .4rem; }
+.m-main .btn-outline-secondary { color: #495057; border-color: #6c757d; }
+.m-bottom a.m-scan i { background: var(--mz-destaque, #ffc107); }

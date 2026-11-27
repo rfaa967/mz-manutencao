@@ -1,6 +1,6 @@
 <?php
 require dirname(__DIR__) . '/app/bootstrap.php';
-limitar_cfg('geral_ip', ip_chave());
+limitar('estatico_ip', ip_chave(), 600);   // contador próprio: não consome o limite de páginas do IP (fábrica atrás de NAT)
 $base = rtrim((string)cfg('base_url', ''), '/');
 header('Content-Type: application/manifest+json; charset=utf-8');
 echo json_encode([

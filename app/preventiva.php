@@ -62,6 +62,8 @@ function gerar_ot_de_plano(array $p, ?string $dataPrevista = null, ?int $usuario
             'descricao'      => $p['descricao'],
             'responsavel_id' => $p['responsavel_id'],
             'data_prevista'  => $dataPrevista ?? ($p['proxima_data'] ?: date('Y-m-d')),
+            // data original da ocorrência no calendário do plano: a data prevista pode ser adiada na OT sem deslocar o plano
+            'data_plano'     => $p['gatilho'] === 'tempo' ? ($p['proxima_data'] ?: null) : null,
             'valor_previsto' => $p['gatilho'] === 'contador' ? $p['proximo_valor'] : null,
             'criado_por'     => $usuarioId,
         ]);
@@ -135,7 +137,7 @@ function reprogramar_plano_apos_ot(int $otId, bool $pular = false): void
             $prox = somar_periodo($dataExec, $per, $un);
             $dados['dia_ancora'] = (int)substr($prox, 8, 2);
         } else {
-            $ref = $ot['data_prevista'] ?: ($p['proxima_data'] ?: $dataExec);
+            $ref = ($ot['data_plano'] ?? null) ?: ($ot['data_prevista'] ?: ($p['proxima_data'] ?: $dataExec));
             $prox = somar_periodo($ref, $per, $un, $ancora);
             $guard = 0;
             while ($prox <= $dataExec && $guard++ < 1000) $prox = somar_periodo($prox, $per, $un, $ancora);
@@ -158,6 +160,11 @@ function reprogramar_plano_apos_ot(int $otId, bool $pular = false): void
         if (!$pular) $dados['ultimo_valor'] = $exec;
         $dados['proximo_valor'] = $prox;
     }
+    // nunca anda para trás: reabrir e reconcluir uma OT antiga não pode desfazer a programação já feita por OTs mais novas
+    foreach (['proxima_data', 'ultima_execucao', 'proximo_valor', 'ultimo_valor'] as $c) {
+        if (isset($dados[$c]) && $p[$c] !== null && $dados[$c] < (in_array($c, ['proximo_valor', 'ultimo_valor'], true) ? (float)$p[$c] : $p[$c])) unset($dados[$c]);
+    }
+    if (!isset($dados['proxima_data'])) unset($dados['dia_ancora']);
     if ($dados) update('planos_manutencao', $dados, (int)$p['id']);
 }
 

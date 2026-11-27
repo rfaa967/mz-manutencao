@@ -17,14 +17,20 @@ if (-not $Saida) { $Saida = Join-Path (Split-Path -Parent $Mdb) ('manwinwin_' + 
 $tabelas = @('Objectos', 'LocaisObj', 'TipObjeto', 'Forneced', 'Especialidade', 'Funcionario', 'Cencusto', 'Sistemas',
              'Fichas', 'Calibra', 'TipTrabalho', 'PTs', 'Causas', 'MestreArtigos', 'Artigos', 'ARQ02')
 
+$funcCols = @('CodFunCnr', 'NomFunCnr', 'Email_Fun', 'CodEspCld', 'CstEspCld', 'FlgActivo')
+
 Add-Type -AssemblyName System.Data
-$extra = ''
-if ($Senha) { $extra = ";Jet OLEDB:Database Password=$Senha" }
 $con = $null
 $ultimoErro = ''
 foreach ($p in @('Microsoft.ACE.OLEDB.16.0', 'Microsoft.ACE.OLEDB.12.0', 'Microsoft.Jet.OLEDB.4.0')) {
     try {
-        $c = New-Object System.Data.OleDb.OleDbConnection("Provider=$p;Data Source=$Mdb;Mode=Read$extra")
+        # builder: caminho ou senha com ";" nao alteram a string de conexao
+        $b = New-Object System.Data.OleDb.OleDbConnectionStringBuilder
+        $b['Provider'] = $p
+        $b['Data Source'] = $Mdb
+        $b['Mode'] = 'Read'
+        if ($Senha) { $b['Jet OLEDB:Database Password'] = $Senha }
+        $c = New-Object System.Data.OleDb.OleDbConnection($b.ConnectionString)
         $c.Open()
         $con = $c
         Write-Host "Driver: $p ($([IntPtr]::Size * 8) bits)"
@@ -67,13 +73,21 @@ try {
         $r = $cmd.ExecuteReader()
         $sw = New-Object System.IO.StreamWriter((Join-Path $tmp "$t.csv"), $false, $utf8)
         try {
-            $cols = New-Object string[] $r.FieldCount
-            for ($i = 0; $i -lt $r.FieldCount; $i++) { $cols[$i] = '"' + $r.GetName($i) + '"' }
+            # senhas e dados pessoais do ManWinWin nao sao exportados (a importacao nao usa)
+            $idx = New-Object System.Collections.Generic.List[int]
+            for ($i = 0; $i -lt $r.FieldCount; $i++) {
+                $nomeCol = $r.GetName($i)
+                if ($nomeCol -match '^(Snh|Senha|Pass|Pwd)') { continue }
+                if ($t -eq 'Funcionario' -and $funcCols -notcontains $nomeCol) { continue }
+                $idx.Add($i)
+            }
+            $cols = New-Object string[] $idx.Count
+            for ($j = 0; $j -lt $idx.Count; $j++) { $cols[$j] = '"' + $r.GetName($idx[$j]) + '"' }
             $sw.WriteLine(($cols -join ','))
             $n = 0
             while ($r.Read()) {
-                $vals = New-Object string[] $r.FieldCount
-                for ($i = 0; $i -lt $r.FieldCount; $i++) { $vals[$i] = Campo ($r.GetValue($i)) }
+                $vals = New-Object string[] $idx.Count
+                for ($j = 0; $j -lt $idx.Count; $j++) { $vals[$j] = Campo ($r.GetValue($idx[$j])) }
                 $sw.WriteLine(($vals -join ','))
                 $n++
             }

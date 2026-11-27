@@ -188,7 +188,13 @@ final class Tabela
             $href = $this->href ? ($this->href)($l) : null;
             $cl = $this->classeLinha ? ($this->classeLinha)($l) : '';
             $h .= '<tr' . ($href ? ' data-href="' . e($href) . '"' : '') . ($cl ? ' class="' . e($cl) . '"' : '') . '>';
-            foreach ($this->colunas as $c) $h .= '<td class="' . e($c['classe'] ?? '') . '">' . ($c['render'])($l) . '</td>';
+            $i = 0;
+            foreach ($this->colunas as $c) {
+                $cel = ($c['render'])($l);
+                // a 1ª célula é um link de verdade: abre a linha pelo teclado, leitor de tela e ctrl+clique
+                if ($href && $i++ === 0) $cel = '<a class="linha-link text-reset text-decoration-none" href="' . e($href) . '">' . $cel . '</a>';
+                $h .= '<td class="' . e($c['classe'] ?? '') . '">' . $cel . '</td>';
+            }
             $h .= '</tr>';
         }
         if (!$this->linhas) {

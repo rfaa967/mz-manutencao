@@ -102,17 +102,32 @@ function login_bloqueado(string $email): bool
     $ip = ip_chave();
     $r = q1("SELECT COALESCE(SUM(email = ? AND ip = ?), 0) par, COALESCE(SUM(ip = ?), 0) por_ip, COALESCE(SUM(email = ?), 0) por_email
              FROM login_falhas WHERE (email = ? OR ip = ?) AND em > NOW() - INTERVAL 15 MINUTE", [$email, $ip, $ip, $email, $email, $ip]);
-    if ($r['par'] >= LOGIN_MAX_FALHAS || $r['por_ip'] >= 50) return true;
-    if ($r['por_email'] < 40) return false;
-    // ataque distribuído contra a conta: bloqueia, exceto a partir de um IP onde o próprio dono já entrou
+    if ($r['par'] >= LOGIN_MAX_FALHAS) return true;
+    // IP compartilhado (fábrica atrás de NAT) ou ataque distribuído: bloqueia, exceto para quem já entrou deste IP
+    if ($r['por_ip'] < 50 && $r['por_email'] < 40) return false;
+    // exceção: IP de onde o próprio dono da conta já entrou nos últimos 90 dias
     // (assim um atacante não consegue trancar o administrador para fora repetindo falhas de vários IPs)
     return !qv("SELECT 1 FROM auditoria a JOIN usuarios u ON u.id = a.entidade_id
-                WHERE a.acao = 'login' AND a.entidade = 'usuarios' AND u.email = ? AND a.ip = ? AND a.criado_em > NOW() - INTERVAL 90 DAY LIMIT 1",
+                WHERE a.acao = 'login' AND a.entidade = 'usuarios' AND u.email = ? AND a.ip = ? AND a.data > NOW() - INTERVAL 90 DAY LIMIT 1",
                [$email, ip_cliente()]);
 }
 
-/** Hash bcrypt fixo usado quando o e-mail não existe: o tempo de resposta fica igual e não revela contas. */
-const HASH_FALSO = '$2y$10$wXlzXaKLaMepx63BNk5qXOcZjziZW0rVYkho13butNjH79qSBRkoW';
+/**
+ * Hash usado quando o e-mail não existe: o tempo de resposta fica igual ao de uma conta real e não revela contas.
+ * Gerado com o custo atual do PASSWORD_DEFAULT (que muda entre versões do PHP) e guardado em storage/.
+ */
+function hash_falso(): string
+{
+    static $h = null;
+    if ($h !== null) return $h;
+    $arq = APP_ROOT . '/storage/hash_falso';
+    $h = is_file($arq) ? trim((string)@file_get_contents($arq)) : '';
+    if ($h === '' || password_needs_rehash($h, PASSWORD_DEFAULT)) {
+        $h = password_hash(bin2hex(random_bytes(16)), PASSWORD_DEFAULT);
+        @file_put_contents($arq, $h, LOCK_EX);
+    }
+    return $h;
+}
 
 /** @return string|null mensagem de erro, ou null em caso de sucesso */
 function login(string $email, string $senha): ?string
@@ -120,7 +135,7 @@ function login(string $email, string $senha): ?string
     $email = mb_strtolower(trim($email));
     if (login_bloqueado($email)) return 'Muitas tentativas. Aguarde 15 minutos e tente novamente.';
     $u = q1('SELECT * FROM usuarios WHERE email = ? AND ativo = 1', [$email]);
-    $ok = password_verify($senha, $u['senha_hash'] ?? HASH_FALSO) && $u;
+    $ok = password_verify($senha, $u['senha_hash'] ?? hash_falso()) && $u;
     if (!$ok) {
         insert('login_falhas', ['email' => mb_substr($email, 0, 150), 'ip' => ip_chave()]);
         auditar('login_falha', 'usuarios', $u ? (int)$u['id'] : null, $email);

@@ -4,7 +4,8 @@ exigir('gerir');
 $ini = (string)get('de', date('Y-m-01', strtotime(date('Y-m-01') . ' -5 months')));
 $fim = (string)get('ate', date('Y-m-d'));
 $avisoPeriodo = null;
-if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $ini) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $fim) || $ini > $fim || strtotime($fim) - strtotime($ini) > 5 * 366 * 86400) {
+$dataOk = fn(string $d) => preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $d, $m) && checkdate((int)$m[2], (int)$m[3], (int)$m[1]) && (int)$m[1] >= 2000 && (int)$m[1] <= 2100;
+if (!$dataOk($ini) || !$dataOk($fim) || $ini > $fim || strtotime($fim) - strtotime($ini) > 5 * 366 * 86400) {
     $avisoPeriodo = 'Período inválido (data inicial depois da final, formato incorreto ou mais de 5 anos). Mostrando o mês atual.';
     $ini = date('Y-m-01'); $fim = date('Y-m-d');
 }
@@ -87,7 +88,7 @@ $k = kpis($ini, $fim, $ids);
 
 $porAtivo = q("SELECT a.id, a.codigo, a.nome, a.criticidade, a.horas_operacao_dia,
       COUNT(o.id) ots, SUM(o.tipo='corretiva') falhas,
-      AVG(CASE WHEN o.tipo='corretiva' AND o.data_inicio IS NOT NULL THEN TIMESTAMPDIFF(MINUTE,o.data_inicio,o.data_fim)/60 END) mttr,
+      AVG(CASE WHEN o.tipo='corretiva' AND o.data_inicio IS NOT NULL AND o.data_fim >= o.data_inicio THEN TIMESTAMPDIFF(MINUTE,o.data_inicio,o.data_fim)/60 END) mttr,
       SUM(" . SQL_CUSTO_OT . ") mo, SUM(" . SQL_CUSTO_MAT . ") mat, SUM(o.custo_externo) ext,
       SUM(" . SQL_CUSTO_OT . " + " . SQL_CUSTO_MAT . " + o.custo_externo) total
     FROM ordens_trabalho o JOIN ativos a ON a.id=o.ativo_id
@@ -154,7 +155,7 @@ view_header('Relatórios & KPIs', 'relatorios'); ?>
     ['Disponibilidade', $k['disponibilidade'] !== null ? num($k['disponibilidade'], 1) . '%' : '—', '(horas operação − parada) / horas operação'],
     ['MTBF', $k['mtbf'] !== null ? num($k['mtbf'], 0) . ' h' : '—', 'tempo médio entre falhas'],
     ['MTTR', $k['mttr'] !== null ? num($k['mttr'], 1) . ' h' : '—', 'tempo médio de reparo (corretivas)'],
-    ['Horas de parada', num($k['horas_parada'], 1) . ' h', $k['corretivas'] . ' falha(s)'],
+    ['Horas de parada', num($k['horas_parada'], 1) . ' h', $k['falhas'] . ' falha(s) em ativos cadastrados'],
     ['OTs concluídas', $k['concluidas'], $k['planejadas'] . ' planejadas · ' . $k['corretivas'] . ' corretivas'],
     ['% Manutenção planejada', $k['pct_planejada'] !== null ? num($k['pct_planejada'], 1) . '%' : '—', 'meta de referência: ≥ 70%'],
     ['Cumprimento preventivas', $k['cumprimento'] !== null ? num($k['cumprimento'], 1) . '%' : '—', 'concluídas até a data prevista'],
@@ -180,7 +181,7 @@ view_header('Relatórios & KPIs', 'relatorios'); ?>
 
 <div class="card mb-3"><div class="card-header bg-white fw-semibold d-flex justify-content-between">Indicadores e custos por ativo <a class="small no-print" href="<?= e($qs('ativos')) ?>">CSV</a></div><div class="table-responsive">
 <table class="table table-sm table-hover mb-0"><thead><tr><th>Ativo</th><th>Crit.</th><th class="text-end">OTs</th><th class="text-end">Falhas</th><th class="text-end">Parada (h)</th><th class="text-end">Disp.</th><th class="text-end">MTBF</th><th class="text-end">MTTR</th><th class="text-end">Mão obra</th><th class="text-end">Materiais</th><th class="text-end">Externo</th><th class="text-end">Total</th></tr></thead><tbody>
-<?php foreach ($porAtivo as $r): ?><tr data-href="<?= e(url('ativos/ver', ['id' => $r['id']])) ?>"><td><?= e($r['codigo'] . ' · ' . $r['nome']) ?></td><td><?= e($r['criticidade']) ?></td><td class="text-end"><?= $r['ots'] ?></td><td class="text-end"><?= (int)$r['falhas'] ?></td>
+<?php foreach ($porAtivo as $r): ?><tr data-href="<?= e(url('ativos/ver', ['id' => $r['id']])) ?>"><td><a class="linha-link text-reset text-decoration-none" href="<?= e(url('ativos/ver', ['id' => $r['id']])) ?>"><?= e($r['codigo'] . ' · ' . $r['nome']) ?></a></td><td><?= e($r['criticidade']) ?></td><td class="text-end"><?= $r['ots'] ?></td><td class="text-end"><?= (int)$r['falhas'] ?></td>
   <td class="text-end"><?= num($r['parada'], 1) ?></td><td class="text-end"><?= $r['disp'] !== null ? num($r['disp'], 1) . '%' : '—' ?></td><td class="text-end"><?= $r['mtbf'] !== null ? num($r['mtbf'], 0) : '—' ?></td><td class="text-end"><?= $r['mttr'] !== null ? num($r['mttr'], 1) : '—' ?></td>
   <td class="text-end"><?= moeda($r['mo']) ?></td><td class="text-end"><?= moeda($r['mat']) ?></td><td class="text-end"><?= moeda($r['ext']) ?></td><td class="text-end fw-semibold"><?= moeda($r['custo']) ?></td></tr>
 <?php endforeach; if (!$porAtivo): ?><tr><td colspan="12" class="text-center text-muted">Sem OTs concluídas no período.</td></tr><?php endif; ?>
@@ -202,7 +203,7 @@ view_header('Relatórios & KPIs', 'relatorios'); ?>
 <div class="card mb-3"><div class="card-header bg-white fw-semibold d-flex justify-content-between">OMs (não preventivas) abertas no período, por área
   <a class="small no-print" href="<?= e(url('ots', ['f' => 'todas', 'origem' => 'om', 'de' => $ini, 'ate' => $fim])) ?>">ver OMs</a></div>
   <table class="table table-sm mb-0"><thead><tr><th>Área</th><th class="text-end">OMs</th><th class="text-end">Concluídas</th><th class="text-end">Pendentes</th><th class="text-end">Prazo médio (dias)</th></tr></thead><tbody>
-  <?php foreach ($omsArea as $oa): ?><tr><td><?= $oa['area'] !== '' ? e(rotulo('area', $oa['area'])) : '<span class="text-muted">não informada</span>' ?></td><td class="text-end"><?= (int)$oa['n'] ?></td><td class="text-end"><?= (int)$oa['concl'] ?></td><td class="text-end <?= $oa['pend'] ? 'text-warning' : '' ?>"><?= (int)$oa['pend'] ?></td><td class="text-end"><?= $oa['dias'] !== null ? num($oa['dias'], 1) : '—' ?></td></tr><?php endforeach; ?>
+  <?php foreach ($omsArea as $oa): ?><tr><td><?= $oa['area'] !== '' ? e(rotulo('area', $oa['area'])) : '<span class="text-muted">não informada</span>' ?></td><td class="text-end"><?= (int)$oa['n'] ?></td><td class="text-end"><?= (int)$oa['concl'] ?></td><td class="text-end <?= $oa['pend'] ? 'fw-semibold' : '' ?>"><?= (int)$oa['pend'] ?></td><td class="text-end"><?= $oa['dias'] !== null ? num($oa['dias'], 1) : '—' ?></td></tr><?php endforeach; ?>
   <?php if (!$omsArea): ?><tr><td colspan="5" class="text-muted text-center">Nenhuma OM aberta no período.</td></tr><?php endif; ?></tbody></table></div>
 
 <div class="row g-3">

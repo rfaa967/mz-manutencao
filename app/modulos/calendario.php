@@ -23,7 +23,7 @@ if ($acao === 'eventos') {
             'url' => url('ots/ver', ['id' => $o['id']]),
             'color' => $cores[$o['tipo']] ?? '#6c757d',
             'textColor' => in_array($o['tipo'], ['lubrificacao', 'preditiva']) ? '#000' : '#fff',
-            'classNames' => array_values(array_filter([$concl ? 'opacity-50' : '', $atrasada ? 'ot-atrasada' : ''])),
+            'classNames' => array_values(array_filter([$concl ? 'ot-concluida' : '', $atrasada ? 'ot-atrasada' : ''])),
         ];
     }
     // projeções (ainda sem OT gerada)
@@ -36,7 +36,7 @@ if ($acao === 'eventos') {
             foreach ($datas as $d) {
                 if ($d < $ini) continue;
                 $ev[] = ['title' => '◌ ' . $p['codigo'] . ' · ' . $p['titulo'], 'start' => $d, 'url' => url('planos/form', ['id' => $p['id']]),
-                         'color' => 'transparent', 'textColor' => $cores[$p['tipo']] ?? '#198754', 'borderColor' => $cores[$p['tipo']] ?? '#198754'];
+                         'color' => '#fff', 'textColor' => '#212529', 'borderColor' => $cores[$p['tipo']] ?? '#198754'];
             }
         }
         foreach (q("SELECT p.*, a.codigo, $pend FROM planos_manutencao p JOIN ativos a ON a.id=p.ativo_id WHERE p.ativo=1 AND p.gatilho='contador' AND a.status<>'desativado'") as $p) {

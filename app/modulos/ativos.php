@@ -33,7 +33,10 @@ if ($acao === 'salvar' && is_post()) {
         if ($id) { update('ativos', $dados, $id); auditar('editar', 'ativos', $id); }
         else { $id = insert('ativos', $dados); auditar('criar', 'ativos', $id); }
         // OMs registradas só com o código patrimonial (planilhas, OTs avulsas) passam a fazer parte do histórico do ativo
-        $ligadas = $dados['patrimonio'] ? qx('UPDATE ordens_trabalho SET ativo_id = ? WHERE ativo_id IS NULL AND patrimonio = ?', [$id, $dados['patrimonio']]) : 0;
+        // (só códigos no formato patrimonial: um "S/N" ou "N/A" digitado não pode puxar OTs de outros equipamentos)
+        $ligadas = patrimonio_valido($dados['patrimonio']) ? qx('UPDATE ordens_trabalho SET ativo_id = ? WHERE ativo_id IS NULL AND patrimonio = ?', [$id, $dados['patrimonio']]) : 0;
+        // as OTs do ativo acompanham o código atual (o antigo pode ser reaproveitado em outro equipamento)
+        qx('UPDATE ordens_trabalho SET patrimonio = ? WHERE ativo_id = ? AND NOT (patrimonio <=> ?)', [$dados['patrimonio'], $id, $dados['patrimonio']]);
         flash('Ativo salvo.' . ($ligadas ? ' ' . plural($ligadas, 'OM com este patrimônio foi ligada', 'OMs com este patrimônio foram ligadas') . ' ao ativo.' : ''));
         redirect('ativos/ver', ['id' => $id]);
     } catch (PDOException $ex) {
@@ -149,10 +152,10 @@ if ($acao === 'etiquetas') {
       <div class="d-flex gap-2"><button class="btn btn-primary btn-sm" data-print><i class="bi bi-printer"></i> Imprimir</button>
       <a class="btn btn-outline-secondary btn-sm" href="<?= e(url('ativos')) ?>">Voltar</a></div></div>
     <form class="card card-body py-2 mb-3 no-print" method="get"><input type="hidden" name="r" value="ativos/etiquetas"><div class="row g-2">
-      <div class="col-md-4"><?= sel('loc', arvore_opcoes('localizacoes'), get('loc'), true, 'class="form-select form-select-sm"', 'Todas as localizações') ?></div>
-      <div class="col-md-3"><?= sel('cat', $cats, get('cat'), true, 'class="form-select form-select-sm"', 'Todas as categorias') ?></div>
-      <div class="col-md-2"><?= sel('crit', ['A' => 'Criticidade A', 'B' => 'Criticidade B', 'C' => 'Criticidade C'], get('crit'), true, 'class="form-select form-select-sm"', 'Toda criticidade') ?></div>
-      <div class="col-md-2"><?= sel('tam', ['p' => 'Pequena (38 mm)', 'm' => 'Média (50 mm)', 'g' => 'Grande (70 mm)'], $tam, false, 'class="form-select form-select-sm"') ?></div>
+      <div class="col-md-4"><?= sel('loc', arvore_opcoes('localizacoes'), get('loc'), true, 'class="form-select form-select-sm" aria-label="Localização"', 'Todas as localizações') ?></div>
+      <div class="col-md-3"><?= sel('cat', $cats, get('cat'), true, 'class="form-select form-select-sm" aria-label="Categoria"', 'Todas as categorias') ?></div>
+      <div class="col-md-2"><?= sel('crit', ['A' => 'Criticidade A', 'B' => 'Criticidade B', 'C' => 'Criticidade C'], get('crit'), true, 'class="form-select form-select-sm" aria-label="Criticidade"', 'Toda criticidade') ?></div>
+      <div class="col-md-2"><?= sel('tam', ['p' => 'Pequena (38 mm)', 'm' => 'Média (50 mm)', 'g' => 'Grande (70 mm)'], $tam, false, 'class="form-select form-select-sm" aria-label="Tamanho da etiqueta"') ?></div>
       <div class="col-md-1"><button class="btn btn-sm btn-secondary w-100">Gerar</button></div>
     </div><div class="form-text">O QR abre a ficha do ativo na versão mobile (<?= e(url_qr('CODIGO')) ?>). Até 500 etiquetas por vez.</div></form>
     <div class="etq-grade">
@@ -230,8 +233,7 @@ if ($acao === 'ver') {
     // indicadores do ativo e componentes (12 meses) — mesmas regras do relatório geral
     $ini = date('Y-m-d', strtotime('-12 months +1 day'));
     $k = kpis($ini, date('Y-m-d'), descendentes('ativos', $id));
-    $disp = $k['disponibilidade'] ?? 0; $mtbf = $k['mtbf']; $custoTotal = $k['custo_total'];
-    $k['falhas'] = $k['corretivas'];
+    $disp = $k['disponibilidade']; $mtbf = $k['mtbf']; $custoTotal = $k['custo_total'];
 
     view_header($a['codigo'], 'ativos');
     if ($tab === 'geral') $GLOBALS['__scripts'] = qr_js(); ?>
@@ -249,7 +251,7 @@ if ($acao === 'ver') {
     </div>
 
     <div class="row g-3 mb-3">
-      <?php foreach ([['Disponibilidade 12m', num($disp, 1) . '%'], ['MTBF (h)', $mtbf !== null ? num($mtbf, 0) : '—'], ['MTTR (h)', $k['mttr'] !== null ? num($k['mttr'], 1) : '—'],
+      <?php foreach ([['Disponibilidade 12m', $disp !== null ? num($disp, 1) . '%' : '—'], ['MTBF (h)', $mtbf !== null ? num($mtbf, 0) : '—'], ['MTTR (h)', $k['mttr'] !== null ? num($k['mttr'], 1) : '—'],
                      ['Falhas 12m', (int)$k['falhas']], ['Custo manutenção 12m', moeda($custoTotal)]] as [$r, $v]): ?>
         <div class="col-6 col-md"><div class="card kpi"><div class="card-body py-2"><div class="rot"><?= $r ?></div><div class="valor fs-4"><?= $v ?></div></div></div></div>
       <?php endforeach; ?>
@@ -303,7 +305,7 @@ if ($acao === 'ver') {
       <div class="table-responsive"><table class="table table-sm table-hover">
         <thead><tr><th>Nº</th><th>Tipo</th><th>Título</th><th>Abertura</th><th>Conclusão</th><th>Responsável</th><th>Parada (h)</th><th class="text-end">Custo</th><th>Status</th></tr></thead><tbody>
         <?php foreach ($ots as $o): ?>
-          <tr data-href="<?= e(url('ots/ver', ['id' => $o['id']])) ?>"><td><?= e($o['numero']) ?></td><td><?= badge('tipo_ot', $o['tipo']) ?></td><td><?= e($o['titulo']) ?></td>
+          <tr data-href="<?= e(url('ots/ver', ['id' => $o['id']])) ?>"><td><a class="linha-link text-reset text-decoration-none" href="<?= e(url('ots/ver', ['id' => $o['id']])) ?>"><?= e($o['numero']) ?></a></td><td><?= badge('tipo_ot', $o['tipo']) ?></td><td><?= e($o['titulo']) ?></td>
           <td><?= dt($o['data_abertura']) ?></td><td><?= dt($o['data_fim']) ?></td><td><?= e($o['responsavel']) ?></td><td><?= num($o['horas_parada'], 1) ?></td>
           <td class="text-end"><?= moeda($o['custo']) ?></td><td><?= badge('ot_status', $o['status']) ?></td></tr>
         <?php endforeach; if (!$ots): ?><tr><td colspan="9" class="text-muted text-center">Sem histórico.</td></tr><?php endif; ?>
@@ -312,7 +314,7 @@ if ($acao === 'ver') {
     <?php elseif ($tab === 'planos'): ?>
       <table class="table table-sm table-hover"><thead><tr><th>Plano</th><th>Tipo</th><th>Gatilho</th><th>Última</th><th>Próxima</th><th>Ativo</th></tr></thead><tbody>
       <?php foreach ($planos as $p): ?>
-        <tr data-href="<?= e(url('planos/form', ['id' => $p['id']])) ?>"><td><?= e($p['titulo']) ?></td><td><?= badge('tipo_ot', $p['tipo']) ?></td>
+        <tr data-href="<?= e(url('planos/form', ['id' => $p['id']])) ?>"><td><a class="linha-link text-reset text-decoration-none" href="<?= e(url('planos/form', ['id' => $p['id']])) ?>"><?= e($p['titulo']) ?></a></td><td><?= badge('tipo_ot', $p['tipo']) ?></td>
         <td><?= $p['gatilho'] === 'tempo' ? 'A cada ' . (int)$p['periodicidade'] . ' ' . e($p['unidade_periodo']) . '(s)' : 'A cada ' . num($p['intervalo_contador'], 0) . ' (contador)' ?></td>
         <td><?= dt($p['ultima_execucao']) ?></td><td><?= $p['gatilho'] === 'tempo' ? dt($p['proxima_data']) : num($p['proximo_valor'], 0) ?></td><td><?= $p['ativo'] ? 'Sim' : 'Não' ?></td></tr>
       <?php endforeach; if (!$planos): ?><tr><td colspan="6" class="text-muted text-center">Nenhum plano.</td></tr><?php endif; ?>
@@ -376,6 +378,8 @@ if ($c = (int)get('cat')) { $t->where[] = 'a.categoria_id = ?'; $t->params[] = $
 if (array_key_exists((string)get('status'), ROTULOS['ativo_status'])) { $t->where[] = 'a.status = ?'; $t->params[] = get('status'); }
 else $t->where[] = "a.status <> 'desativado'";
 if (in_array(get('crit'), ['A', 'B', 'C'], true)) { $t->where[] = 'a.criticidade = ?'; $t->params[] = get('crit'); }
+if (get('pat') === 'sem') $t->where[] = "(a.patrimonio IS NULL OR a.patrimonio = '')";
+elseif (get('pat') === 'com') $t->where[] = "a.patrimonio <> ''";
 if ($modo === 'lista') $t->responder('ativos');
 
 view_header('Ativos', 'ativos'); ?>
@@ -423,10 +427,11 @@ view_header('Ativos', 'ativos'); ?>
 <?php else: ?>
     <form class="card card-body mb-3 py-2" method="get"><input type="hidden" name="r" value="ativos">
       <div class="row g-2">
-        <div class="col-md-4"><?= sel('loc', $locs, get('loc'), true, 'class="form-select form-select-sm" aria-label="Localização" data-auto-submit', 'Todas as localizações') ?></div>
-        <div class="col-md-3"><?= sel('cat', $cats, get('cat'), true, 'class="form-select form-select-sm" aria-label="Categoria" data-auto-submit', 'Todas as categorias') ?></div>
+        <div class="col-md-3"><?= sel('loc', $locs, get('loc'), true, 'class="form-select form-select-sm" aria-label="Localização" data-auto-submit', 'Todas as localizações') ?></div>
+        <div class="col-md-2"><?= sel('cat', $cats, get('cat'), true, 'class="form-select form-select-sm" aria-label="Categoria" data-auto-submit', 'Todas as categorias') ?></div>
         <div class="col-md-3"><?= sel('status', lista_rotulos('ativo_status'), get('status'), true, 'class="form-select form-select-sm" aria-label="Status" data-auto-submit', 'Ativos em uso') ?></div>
         <div class="col-md-2"><?= sel('crit', ['A' => 'Criticidade A', 'B' => 'Criticidade B', 'C' => 'Criticidade C'], get('crit'), true, 'class="form-select form-select-sm" aria-label="Criticidade" data-auto-submit', 'Toda criticidade') ?></div>
+        <div class="col-md-2"><?= sel('pat', ['sem' => 'Sem cód. patrimônio', 'com' => 'Com cód. patrimônio'], get('pat'), true, 'class="form-select form-select-sm" aria-label="Código patrimonial" data-auto-submit', 'Patrimônio: todos') ?></div>
       </div>
     </form>
     <?= $t->html() ?>

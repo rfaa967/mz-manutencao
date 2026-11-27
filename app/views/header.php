@@ -33,6 +33,7 @@ $cad = [
 <meta name="csrf" content="<?= e(csrf_token()) ?>">
 </head>
 <body<?= !empty($GLOBALS['__auto_print']) ? ' data-auto-print="1"' : '' ?>>
+<?php if (usuario()): ?><a class="visually-hidden-focusable btn btn-warning m-2 no-print" href="#conteudo">Pular para o conteúdo</a><?php endif; ?>
 <div class="d-none d-print-block mb-2 border-bottom pb-1"><?php if ($logo = marca_url('logo')): ?><img src="<?= e($logo) ?>" alt="" class="me-2 align-middle" style="max-height:32px"><?php endif; ?><strong><?= e(cfg('empresa')) ?></strong> · <?= e(cfg('app_nome')) ?> <span class="float-end small"><?= date('d/m/Y H:i') ?></span></div>
 <?php if ($u): ?>
 <nav class="navbar navbar-dark bg-dark d-lg-none px-3">
@@ -71,7 +72,7 @@ $cad = [
       <form method="post" action="<?= e(url('logout')) ?>" class="d-inline"><?= csrf_field() ?><button class="btn btn-link link-warning p-0 align-baseline small">Sair</button></form>
     </div>
   </aside>
-  <main class="flex-grow-1 p-3 p-lg-4 conteudo">
+  <main class="flex-grow-1 p-3 p-lg-4 conteudo" id="conteudo" tabindex="-1">
     <?php if ($u['perfil'] === 'admin' && !empty($GLOBALS['__cfg_segredo_ilegivel']) && ($GLOBALS['__menu'] ?? '') !== 'configuracoes'): ?><div class="alert alert-danger py-2 small no-print"><i class="bi bi-exclamation-octagon"></i> Algumas senhas/chaves salvas não puderam ser lidas (storage/app.key mudou). <a href="<?= e(url('configuracoes')) ?>">Ver em Configurações</a></div><?php endif; ?>
     <?php if (in_array($u['perfil'], ['tecnico', 'solicitante'], true)): ?><a href="<?= e(url('m')) ?>" class="alert alert-warning d-block d-md-none py-2 small text-decoration-none no-print"><i class="bi bi-phone"></i> Está no celular? Abra a <strong>versão mobile</strong>, com leitor de QR Code.</a><?php endif; ?>
 <?php else: ?>

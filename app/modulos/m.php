@@ -19,7 +19,7 @@ function m_item_ot(array $o): string
     $atr = !in_array($o['status'], ['concluida', 'cancelada'], true) && $o['data_prevista'] && $o['data_prevista'] < date('Y-m-d');
     return '<a href="' . e(url('m/ot', ['id' => $o['id']])) . '" class="' . ($atr ? 'atrasada' : '') . '">'
         . '<div class="d-flex justify-content-between gap-2"><strong>' . e($o['titulo']) . '</strong>' . badge('ot_status', $o['status']) . '</div>'
-        . '<div class="m-sub">' . e($o['numero']) . ' · ' . e($o['codigo'] ?? '') . ' · ' . badge('tipo_ot', $o['tipo']) . ' ' . badge('prioridade', $o['prioridade'])
+        . '<div class="m-sub">' . e($o['numero']) . ' · ' . e(($o['codigo'] ?? '') ?: (($o['patrimonio'] ?? '') ?: mb_strimwidth((string)($o['equipamento'] ?? ''), 0, 40, '…'))) . ' · ' . badge('tipo_ot', $o['tipo']) . ' ' . badge('prioridade', $o['prioridade'])
         . ($o['data_prevista'] ? ' · <span class="' . ($atr ? 'text-danger fw-semibold' : '') . '">' . ($atr ? '⚠ ' : '') . dt($o['data_prevista']) . '</span>' : '') . '</div></a>';
 }
 
@@ -27,8 +27,8 @@ function m_item_ot(array $o): string
 if ($acao === 'index') {
     m_header('Olá, ' . explode(' ', $u['nome'])[0], null, 'inicio'); ?>
     <form method="get" class="mb-3"><input type="hidden" name="r" value="m/buscar">
-      <div class="input-group"><input class="form-control" name="q" placeholder="Código ou nome do equipamento" autocomplete="off">
-        <button class="btn btn-dark"><i class="bi bi-search"></i></button></div></form>
+      <div class="input-group"><input class="form-control" name="q" placeholder="Código, patrimônio ou nome" aria-label="Buscar equipamento por código, patrimônio ou nome" autocomplete="off">
+        <button class="btn btn-dark" aria-label="Buscar"><i class="bi bi-search" aria-hidden="true"></i></button></div></form>
     <a href="<?= e(url('m/scan')) ?>" class="btn btn-warning btn-m w-100 mb-3"><i class="bi bi-qr-code-scan"></i> Ler QR Code do equipamento</a>
     <?php if (pode('ver')):
         $minhas = $u['tecnico_id'] ? q("SELECT o.*, a.codigo FROM ordens_trabalho o LEFT JOIN ativos a ON a.id=o.ativo_id
@@ -74,7 +74,7 @@ if ($acao === 'buscar') {
     if (count($res) === 1) redirect('m/ativo', ['id' => $res[0]['id']]);
     m_header('Buscar equipamento', url('m'), 'inicio'); ?>
     <form method="get" class="mb-3"><input type="hidden" name="r" value="m/buscar">
-      <div class="input-group"><input class="form-control" name="q" value="<?= e($t) ?>" autofocus><button class="btn btn-dark"><i class="bi bi-search"></i></button></div></form>
+      <div class="input-group"><input class="form-control" name="q" value="<?= e($t) ?>" aria-label="Buscar equipamento por código, patrimônio ou nome" autofocus><button class="btn btn-dark" aria-label="Buscar"><i class="bi bi-search" aria-hidden="true"></i></button></div></form>
     <div class="m-lista"><?php foreach ($res as $a): ?>
       <a href="<?= e(url('m/ativo', ['id' => $a['id']])) ?>"><div class="d-flex justify-content-between"><strong><?= e($a['codigo']) ?></strong><?= badge('ativo_status', $a['status']) ?></div>
         <div><?= e($a['nome']) ?></div><div class="m-sub"><?= e($a['local']) ?></div></a>
@@ -103,6 +103,7 @@ if ($acao === 'ativo') {
       <div class="d-flex justify-content-between align-items-start gap-2"><h1 class="h5 mb-1"><?= e($a['nome']) ?></h1><?= badge('ativo_status', $a['status']) ?></div>
       <div class="small text-muted mb-2"><?= e(caminho_localizacao($a['localizacao_id'] ? (int)$a['localizacao_id'] : null)) ?></div>
       <dl class="m-kv mb-0">
+        <?php if ($a['patrimonio']): ?><dt>Patrimônio</dt><dd><strong><?= e($a['patrimonio']) ?></strong></dd><?php endif; ?>
         <?php if ($a['fabricante'] || $a['modelo']): ?><dt>Modelo</dt><dd><?= e(trim($a['fabricante'] . ' ' . $a['modelo'])) ?></dd><?php endif; ?>
         <?php if ($a['numero_serie']): ?><dt>Nº série</dt><dd><?= e($a['numero_serie']) ?></dd><?php endif; ?>
         <dt>Criticidade</dt><dd><?= e($a['criticidade']) ?></dd>
@@ -203,8 +204,8 @@ if ($acao === 'ots') {
     m_header('Ordens de trabalho', url('m'), 'ots'); ?>
     <div class="btn-group w-100 mb-3">
       <?php foreach (['minhas' => 'Minhas', 'atrasadas' => 'Atrasadas', 'sem' => 'Sem resp.', 'todas' => 'Todas'] as $k => $r): ?>
-        <a class="btn btn-sm btn-outline-dark <?= $f === $k ? 'active' : '' ?>" href="<?= e(url('m/ots', ['f' => $k])) ?>"><?= $r ?></a><?php endforeach; ?></div>
-    <div class="m-lista"><?php foreach ($ots as $o) echo m_item_ot($o); if (!$ots): ?><div class="m-item text-muted">Nada por aqui.</div><?php endif; ?></div>
+        <a class="btn btn-outline-dark <?= $f === $k ? 'active' : '' ?>" <?= $f === $k ? 'aria-current="true"' : '' ?> href="<?= e(url('m/ots', ['f' => $k])) ?>"><?= $r ?></a><?php endforeach; ?></div>
+    <div class="m-lista"><?php foreach ($ots as $o) echo m_item_ot($o); if (!$ots): ?><div class="m-item text-muted">Nenhuma OT pendente neste filtro.</div><?php endif; ?></div>
     <?php m_footer(); exit;
 }
 
@@ -215,8 +216,10 @@ if ($acao === 'nova_ot') {
     m_header('Abrir OT', $a ? url('m/ativo', ['id' => $a['id']]) : url('m')); ?>
     <form method="post" action="<?= e(url('ots/salvar')) ?>" class="m-card"><?= csrf_field() ?><input type="hidden" name="_m" value="1">
       <?php if ($a): ?><input type="hidden" name="ativo_id" value="<?= $a['id'] ?>"><div class="mb-3"><div class="small text-muted">Equipamento</div><strong><?= e($a['codigo'] . ' · ' . $a['nome']) ?></strong></div>
-      <?php else: ?><div class="mb-3"><label class="form-label">Equipamento</label><?= sel('ativo_id', arvore_opcoes('ativos'), null) ?></div><?php endif; ?>
-      <div class="mb-3"><label class="form-label">Tipo</label><?= sel('tipo', lista_rotulos('tipo_ot'), 'corretiva', false) ?></div>
+      <?php else: ?><div class="mb-3"><label class="form-label" for="f_ativo_id">Equipamento cadastrado</label><?= sel('ativo_id', arvore_opcoes('ativos'), null, true, '', '— nenhum —') ?></div>
+        <div class="mb-3"><label class="form-label" for="m_equip">Ou equipamento / local (não cadastrado)</label><input class="form-control" id="m_equip" name="equipamento" maxlength="150" placeholder="ex.: Bebedouro 1, Sanitário 2"></div><?php endif; ?>
+      <div class="mb-3"><label class="form-label" for="f_tipo">Tipo</label><?= sel('tipo', lista_rotulos('tipo_ot'), 'corretiva', false) ?></div>
+      <div class="mb-3"><label class="form-label" for="f_area">Área</label><?= sel('area', lista_rotulos('area'), null, true, '', '— não informada —') ?></div>
       <div class="mb-3"><label class="form-label">Título *</label><input class="form-control" name="titulo" required maxlength="150"></div>
       <div class="mb-3"><label class="form-label">Descrição</label><textarea class="form-control" name="descricao" rows="3"></textarea></div>
       <?php if (pode('gerir')): ?><div class="mb-3"><label class="form-label">Prioridade</label><?= sel('prioridade', lista_rotulos('prioridade'), 'media', false) ?></div>
@@ -247,7 +250,10 @@ if ($acao === 'ot') {
     <div class="m-card">
       <div class="small mb-1"><?= badge('tipo_ot', $o['tipo']) ?> <?= badge('prioridade', $o['prioridade']) ?> <?= badge('ot_status', $o['status']) ?></div>
       <h1 class="h5"><?= e($o['titulo']) ?></h1>
-      <dl class="m-kv mb-2"><dt>Equip.</dt><dd><?= $o['ativo_id'] ? '<a href="' . e(url('m/ativo', ['id' => $o['ativo_id']])) . '">' . e($o['codigo'] . ' · ' . $o['ativo_nome']) . '</a>' : '—' ?></dd>
+      <dl class="m-kv mb-2"><dt>Equip.</dt><dd><?= $o['ativo_id'] ? '<a href="' . e(url('m/ativo', ['id' => $o['ativo_id']])) . '">' . e($o['codigo'] . ' · ' . $o['ativo_nome']) . '</a>' : e($o['equipamento'] ?: '—') ?></dd>
+        <?php if ($o['patrimonio']): ?><dt>Patrim.</dt><dd><?= e($o['patrimonio']) ?></dd><?php endif; ?>
+        <?php if ($o['area']): ?><dt>Área</dt><dd><?= badge('area', $o['area']) ?></dd><?php endif; ?>
+        <?php if ($o['solicitante']): ?><dt>Solic.</dt><dd><?= e($o['solicitante']) ?><?= $o['numero_sm'] ? ' · SM ' . e($o['numero_sm']) : '' ?></dd><?php endif; ?>
         <dt>Prevista</dt><dd><?= dt($o['data_prevista']) ?: '—' ?></dd><dt>Resp.</dt><dd><?= e($o['responsavel'] ?: '—') ?></dd>
         <?php if ($o['data_inicio']): ?><dt>Início</dt><dd><?= dt($o['data_inicio'], true) ?></dd><?php endif; ?>
         <?php if ($o['data_fim']): ?><dt>Término</dt><dd><?= dt($o['data_fim'], true) ?></dd><?php endif; ?></dl>
@@ -258,7 +264,7 @@ if ($acao === 'ot') {
     <?php if ($exec): ?>
       <form method="post" action="<?= e(url('ots/status')) ?>" class="mb-3"><?= $hid() ?>
         <?php if (in_array($o['status'], ['aberta', 'planejada'], true)): ?><button class="btn btn-primary btn-m w-100" name="novo" value="iniciar"><i class="bi bi-play-fill"></i> Iniciar trabalho</button>
-        <?php elseif ($o['status'] === 'em_execucao'): ?><button class="btn btn-outline-warning w-100" name="novo" value="aguardar"><i class="bi bi-pause-fill"></i> Aguardando peças</button>
+        <?php elseif ($o['status'] === 'em_execucao'): ?><button class="btn btn-warning btn-m w-100" name="novo" value="aguardar"><i class="bi bi-pause-fill"></i> Aguardando peças</button>
         <?php elseif ($o['status'] === 'aguardando_pecas'): ?><button class="btn btn-primary btn-m w-100" name="novo" value="retomar"><i class="bi bi-play-fill"></i> Retomar</button><?php endif; ?>
       </form>
     <?php endif; ?>
@@ -274,11 +280,11 @@ if ($acao === 'ot') {
       <?php if ($exec && ($u['tecnico_id'] || pode('gerir'))): ?>
         <form method="post" action="<?= e(url('ots/mo_add')) ?>" class="mt-2"><?= $hid() ?>
           <input type="hidden" name="tecnico_id" value="<?= (int)($u['tecnico_id'] ?: $o['responsavel_id']) ?>"><input type="hidden" name="data" value="<?= date('Y-m-d') ?>">
-          <div class="d-flex gap-2 mb-2"><?php foreach (['0,5', '1', '2', '4'] as $h): ?><button class="btn btn-outline-dark flex-fill" name="horas" value="<?= $h ?>">+<?= $h ?> h</button><?php endforeach; ?></div>
+          <div class="d-flex gap-2 mb-2"><?php foreach (['0,5', '1', '2', '4'] as $h): ?><button class="btn btn-outline-dark flex-fill" name="horas" value="<?= $h ?>" data-confirm="Apontar <?= $h ?> h nesta OT?">+<?= $h ?> h</button><?php endforeach; ?></div>
         </form>
         <form method="post" action="<?= e(url('ots/mo_add')) ?>"><?= $hid() ?>
           <input type="hidden" name="tecnico_id" value="<?= (int)($u['tecnico_id'] ?: $o['responsavel_id']) ?>"><input type="hidden" name="data" value="<?= date('Y-m-d') ?>">
-          <div class="input-group input-group-sm"><input class="form-control" inputmode="decimal" name="horas" placeholder="Outra quantidade (h)" required><button class="btn btn-outline-secondary">Apontar</button></div></form>
+          <div class="input-group"><input class="form-control" inputmode="decimal" name="horas" placeholder="Outra quantidade (h)" aria-label="Horas a apontar" required><button class="btn btn-outline-secondary">Apontar</button></div></form>
       <?php endif; ?></div>
 
     <div class="m-card"><h2>Materiais</h2>
@@ -286,8 +292,8 @@ if ($acao === 'ot') {
       <?php if (!$mat): ?><div class="small text-muted">Nenhum material.</div><?php endif; ?>
       <?php if ($exec): ?>
         <form method="post" action="<?= e(url('ots/mat_add')) ?>" class="mt-2"><?= $hid() ?>
-          <?= sel('artigo_id', opcoes("SELECT id, CONCAT(codigo,' · ',descricao,' (',FORMAT(estoque_atual,1,'pt_BR'),' ',unidade,')') FROM artigos WHERE ativo=1 AND estoque_atual > 0 ORDER BY codigo"), null, true, 'required class="form-select mb-2"', 'Selecione a peça') ?>
-          <div class="input-group"><input class="form-control" inputmode="decimal" name="quantidade" placeholder="Quantidade" required><button class="btn btn-outline-dark">Requisitar</button></div></form>
+          <?= sel('artigo_id', opcoes("SELECT id, CONCAT(codigo,' · ',descricao,' (',FORMAT(estoque_atual,1,'pt_BR'),' ',unidade,')') FROM artigos WHERE ativo=1 AND estoque_atual > 0 ORDER BY codigo"), null, true, 'required class="form-select mb-2" aria-label="Peça"', 'Selecione a peça') ?>
+          <div class="input-group"><input class="form-control" inputmode="decimal" name="quantidade" placeholder="Quantidade" aria-label="Quantidade" required><button class="btn btn-outline-dark">Requisitar</button></div></form>
       <?php endif; ?></div>
 
     <?php if ($exec): ?>

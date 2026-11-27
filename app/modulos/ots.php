@@ -41,6 +41,14 @@ function saldo_disponivel(int $artigoId, int $exceptoOt = 0): float
                       FROM artigos a WHERE a.id = ?", [$exceptoOt, $artigoId]);
 }
 
+/** Dentro de uma transação: trava a OT e garante que continua aberta (concluir/cancelar em paralelo não deixam lançamento órfão). */
+function ot_travar_aberta(int $otId): array
+{
+    $o = ot_carregar($otId, true);
+    if (!$o || !ot_aberta($o)) throw new RuntimeException('Esta OT já foi encerrada.');
+    return $o;
+}
+
 /** Executa $fn numa transação; erros de validação/estoque viram mensagem, o resto sobe. */
 function ot_transacao(int $otId, string $ancora, callable $fn): void
 {
@@ -48,7 +56,10 @@ function ot_transacao(int $otId, string $ancora, callable $fn): void
     try { $fn(); db()->commit(); }
     catch (RuntimeException $ex) {
         if (db()->inTransaction()) db()->rollBack();
-        $msg = $ex instanceof PDOException ? 'Valor fora do limite permitido ou dado inválido.' : $ex->getMessage();
+        if ($ex instanceof PDOException) error_log('[MZManut] OT #' . $otId . ': ' . $ex->getMessage());
+        $cod = $ex instanceof PDOException ? (int)($ex->errorInfo[1] ?? 0) : 0;
+        $msg = !($ex instanceof PDOException) ? $ex->getMessage()
+             : (in_array($cod, [1205, 1213], true) ? 'Outra operação estava em andamento nesta OT. Tente de novo.' : 'Valor fora do limite permitido ou dado inválido.');
         flash($msg, 'danger');
         ot_voltar($otId, $ancora);
     }
@@ -74,8 +85,19 @@ if ($acao === 'salvar' && is_post()) {
         'numero_sm' => mb_substr(trim((string)post('numero_sm')), 0, 20) ?: null,
     ];
     // patrimônio ↔ ativo: o código do ativo prevalece; sem ativo escolhido, um patrimônio cadastrado vincula o ativo
-    if ($dados['ativo_id'] && ($patAtivo = qv('SELECT patrimonio FROM ativos WHERE id = ?', [$dados['ativo_id']]))) $dados['patrimonio'] = $patAtivo;
-    elseif (!$dados['ativo_id'] && $dados['patrimonio'] && ($idPat = qv('SELECT id FROM ativos WHERE patrimonio = ?', [$dados['patrimonio']]))) $dados['ativo_id'] = (int)$idPat;
+    // (ao editar, o formulário devolve o patrimônio do ativo anterior: se o ativo mudou, esse eco é descartado)
+    $ant = $id ? q1('SELECT o.ativo_id, a.patrimonio FROM ordens_trabalho o LEFT JOIN ativos a ON a.id = o.ativo_id WHERE o.id = ?', [$id]) : null;
+    if ($ant && $ant['patrimonio'] && $dados['patrimonio'] === $ant['patrimonio'] && (int)$ant['ativo_id'] !== (int)$dados['ativo_id']) $dados['patrimonio'] = null;
+    $ligadaPorPatrimonio = null;
+    if ($dados['ativo_id']) {
+        $patAtivo = qv('SELECT patrimonio FROM ativos WHERE id = ?', [$dados['ativo_id']]);
+        if ($patAtivo) $dados['patrimonio'] = $patAtivo;
+        elseif ($dados['patrimonio'] && ($outro = qv('SELECT codigo FROM ativos WHERE patrimonio = ? AND id <> ?', [$dados['patrimonio'], $dados['ativo_id']]))) {
+            flash("O patrimônio {$dados['patrimonio']} pertence ao ativo $outro. Escolha esse ativo ou apague o código.", 'danger'); $volta();
+        }
+    } elseif ($dados['patrimonio'] && patrimonio_valido($dados['patrimonio']) && ($at = q1('SELECT id, codigo FROM ativos WHERE patrimonio = ?', [$dados['patrimonio']]))) {
+        $dados['ativo_id'] = (int)$at['id']; $ligadaPorPatrimonio = $at['codigo'];
+    }
     if ($dados['titulo'] === '') { flash('Informe o título.', 'danger'); $volta(); }
     if (dec_invalido('custo_externo') || $dados['custo_externo'] > OT_LIMITE_VALOR) { flash('Custo externo inválido.', 'danger'); $volta(); }
     if ($dados['ativo_id'] && !qv('SELECT 1 FROM ativos WHERE id = ?', [$dados['ativo_id']])) { flash('Ativo inválido.', 'danger'); $volta(); }
@@ -97,7 +119,7 @@ if ($acao === 'salvar' && is_post()) {
         notificar_ot_atribuida($id);
     }
     atualizar_status_ativo($dados['ativo_id']);
-    flash('Ordem de trabalho salva.');
+    flash('Ordem de trabalho salva' . ($ligadaPorPatrimonio ? " e ligada ao ativo $ligadaPorPatrimonio pelo código patrimonial." : '.'));
     redirect_m('m/ot', ['id' => $id]);
     redirect('ots/ver', ['id' => $id]);
 }
@@ -225,10 +247,13 @@ if ($acao === 'mo_add' && is_post()) {
     elseif ($horas === null || round($horas, 2) <= 0 || $horas > 24) flash('Informe as horas (entre 0,01 e 24 por lançamento).', 'danger');
     elseif ($data > date('Y-m-d')) flash('A data do apontamento não pode estar no futuro.', 'danger');
     else {
-        insert('ot_mao_obra', ['ot_id' => $o['id'], 'tecnico_id' => $tec['id'], 'data' => $data, 'horas' => round($horas, 2), 'custo_hora' => $tec['custo_hora'], 'observacao' => mb_substr((string)post('observacao'), 0, 255) ?: null]);
-        if (in_array($o['status'], ['aberta', 'planejada'], true)) qx("UPDATE ordens_trabalho SET status = 'em_execucao', data_inicio = COALESCE(data_inicio, NOW()) WHERE id = ?", [$o['id']]);
+        ot_transacao((int)$o['id'], 'maoobra', function () use ($o, $tec, $data, $horas) {
+            $st = ot_travar_aberta((int)$o['id'])['status'];
+            insert('ot_mao_obra', ['ot_id' => $o['id'], 'tecnico_id' => $tec['id'], 'data' => $data, 'horas' => round($horas, 2), 'custo_hora' => $tec['custo_hora'], 'observacao' => mb_substr((string)post('observacao'), 0, 255) ?: null]);
+            if (in_array($st, ['aberta', 'planejada'], true)) qx("UPDATE ordens_trabalho SET status = 'em_execucao', data_inicio = COALESCE(data_inicio, NOW()) WHERE id = ?", [$o['id']]);
+            recalcular_custos_ot((int)$o['id']);
+        });
         atualizar_status_ativo($o['ativo_id'] ? (int)$o['ativo_id'] : null);
-        recalcular_custos_ot((int)$o['id']);
         flash(num($horas, 2) . ' h apontadas.');
     }
     ot_voltar((int)$o['id'], 'maoobra');
@@ -237,8 +262,12 @@ if ($acao === 'mo_del' && is_post()) {
     exigir('executar');
     $o = ot_exigir_execucao(ot_carregar((int)post_int('id')));
     $cond = pode('gerir') ? '' : ' AND tecnico_id = ' . (int)$u['tecnico_id'];
-    qx('DELETE FROM ot_mao_obra WHERE id = ? AND ot_id = ?' . $cond, [post_int('item_id'), $o['id']]);
-    recalcular_custos_ot((int)$o['id']);
+    $item = post_int('item_id');
+    ot_transacao((int)$o['id'], 'maoobra', function () use ($o, $cond, $item) {
+        ot_travar_aberta((int)$o['id']);
+        qx('DELETE FROM ot_mao_obra WHERE id = ? AND ot_id = ?' . $cond, [$item, $o['id']]);
+        recalcular_custos_ot((int)$o['id']);
+    });
     ot_voltar((int)$o['id'], 'maoobra');
 }
 
@@ -251,6 +280,7 @@ if ($acao === 'mat_add' && is_post()) {
     if (!$art || $qtd === null || round($qtd, 3) <= 0 || $qtd > 999999) { flash('Selecione o material e informe uma quantidade válida.', 'danger'); ot_voltar((int)$o['id'], 'materiais'); }
     $qtd = round($qtd, 3);
     ot_transacao((int)$o['id'], 'materiais', function () use ($o, $art, $qtd) {
+        ot_travar_aberta((int)$o['id']);
         qv('SELECT id FROM artigos WHERE id = ? FOR UPDATE', [$art['id']]);
         $livre = saldo_disponivel((int)$art['id'], (int)$o['id']);
         if ($qtd > $livre + 1e-9) {
@@ -268,6 +298,7 @@ if ($acao === 'mat_del' && is_post()) {
     exigir('executar');
     $o = ot_exigir_execucao(ot_carregar((int)post_int('id')));
     ot_transacao((int)$o['id'], 'materiais', function () use ($o) {
+        ot_travar_aberta((int)$o['id']);
         // trava a linha: dois cliques/abas não devolvem a mesma peça duas vezes
         $m = q1('SELECT * FROM ot_materiais WHERE id = ? AND ot_id = ? FOR UPDATE', [post_int('item_id'), $o['id']]);
         if (!$m) return;
@@ -282,6 +313,7 @@ if ($acao === 'mat_baixar' && is_post()) {
     exigir('executar');
     $o = ot_exigir_execucao(ot_carregar((int)post_int('id')));
     ot_transacao((int)$o['id'], 'materiais', function () use ($o) {
+        ot_travar_aberta((int)$o['id']);
         $m = q1('SELECT * FROM ot_materiais WHERE id = ? AND ot_id = ? AND baixado = 0 FOR UPDATE', [post_int('item_id'), $o['id']]);
         if (!$m) return;
         $custo = movimentar_estoque((int)$m['artigo_id'], 'saida', (float)$m['quantidade'], null, (int)$o['id'], $o['numero'], 'Requisição para OT');
@@ -304,7 +336,10 @@ if ($acao === 'tarefa_add' && is_post()) {
     exigir('executar');
     $o = ot_exigir_execucao(ot_carregar((int)post_int('id')));
     if (post('descricao')) {
-        insert('ot_tarefas', ['ot_id' => $o['id'], 'descricao' => mb_substr((string)post('descricao'), 0, 255), 'ordem' => (int)qv('SELECT COALESCE(MAX(ordem),0)+1 FROM ot_tarefas WHERE ot_id=?', [$o['id']])]);
+        ot_transacao((int)$o['id'], 'checklist', function () use ($o) {
+            ot_travar_aberta((int)$o['id']);
+            insert('ot_tarefas', ['ot_id' => $o['id'], 'descricao' => mb_substr((string)post('descricao'), 0, 255), 'ordem' => (int)qv('SELECT COALESCE(MAX(ordem),0)+1 FROM ot_tarefas WHERE ot_id=?', [$o['id']])]);
+        });
     }
     ot_voltar((int)$o['id'], 'checklist');
 }
@@ -321,27 +356,30 @@ if ($acao === 'form') {
       <a class="btn btn-outline-secondary btn-sm" href="<?= e($id ? url('ots/ver', ['id' => $id]) : url('ots')) ?>">Voltar</a></div>
     <div class="card"><div class="card-body">
     <form method="post" action="<?= e(url('ots/salvar')) ?>"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $id ?: '' ?>">
-      <div class="row g-3">
+      <fieldset class="row g-3 mb-1"><legend class="h6 text-muted mb-0">Onde é o serviço</legend>
         <div class="col-md-6"><label class="form-label" for="f_ativo">Ativo cadastrado</label><?= sel('ativo_id', arvore_opcoes('ativos'), $o['ativo_id'] ?? null, true, 'id="f_ativo"', '— nenhum (informe o equipamento/local) —') ?></div>
         <div class="col-md-4"><label class="form-label" for="f_equip">Equipamento / local</label><input class="form-control" id="f_equip" name="equipamento" maxlength="150" placeholder="Ex.: Bebedouro 1, Sanitário, Lixadeira 7&quot;" value="<?= e($o['equipamento'] ?? '') ?>">
           <div class="form-text">Para o que não é ativo cadastrado.</div></div>
-        <div class="col-md-2"><label class="form-label" for="f_pat">Cód. patrimônio</label><input class="form-control text-uppercase" id="f_pat" name="patrimonio" maxlength="40" placeholder="C1.10.016" value="<?= e($o['patrimonio'] ?? '') ?>"></div>
-        <div class="col-md-3"><label class="form-label">Tipo</label><?= sel('tipo', lista_rotulos('tipo_ot'), $o['tipo'], false) ?></div>
+        <div class="col-md-2"><label class="form-label" for="f_pat">Cód. patrimônio</label><input class="form-control text-uppercase" id="f_pat" name="patrimonio" maxlength="40" placeholder="C1.10.016" value="<?= e($o['patrimonio'] ?? '') ?>" aria-describedby="f_pat_aj">
+          <div class="form-text" id="f_pat_aj">Se for de um ativo cadastrado, a OT é ligada a ele.</div></div>
+      </fieldset>
+      <fieldset class="row g-3 mt-1"><legend class="h6 text-muted mb-0">O que fazer</legend>
+        <div class="col-md-3"><label class="form-label" for="f_tipo">Tipo</label><?= sel('tipo', lista_rotulos('tipo_ot'), $o['tipo'], false) ?></div>
         <div class="col-md-3"><label class="form-label" for="f_area">Área</label><?= sel('area', lista_rotulos('area'), $o['area'] ?? null, true, 'id="f_area"', '— não informada —') ?></div>
         <div class="col-md-3"><label class="form-label" for="f_emp">Empresa</label><input class="form-control" id="f_emp" name="empresa" maxlength="60" list="l_empresas" value="<?= e($o['empresa'] ?? '') ?>">
           <datalist id="l_empresas"><?php foreach (ot_empresas() as $em): ?><option value="<?= e($em) ?>"><?php endforeach; ?></datalist></div>
-        <div class="col-md-3"><label class="form-label">Prioridade</label><?= sel('prioridade', lista_rotulos('prioridade'), $o['prioridade'], false, pode('gerir') ? '' : 'disabled') ?></div>
-        <div class="col-12"><label class="form-label">Título *</label><input class="form-control" name="titulo" required maxlength="150" value="<?= e($o['titulo'] ?? '') ?>"></div>
-        <div class="col-12"><label class="form-label">Descrição do trabalho</label><textarea class="form-control" name="descricao" rows="4"><?= e($o['descricao'] ?? '') ?></textarea></div>
+        <div class="col-md-3"><label class="form-label" for="f_prioridade">Prioridade</label><?= sel('prioridade', lista_rotulos('prioridade'), $o['prioridade'], false, pode('gerir') ? '' : 'disabled') ?></div>
+        <div class="col-12"><label class="form-label" for="f_titulo">Título <span class="text-danger" aria-hidden="true">*</span></label><input class="form-control" id="f_titulo" name="titulo" required maxlength="150" value="<?= e($o['titulo'] ?? '') ?>"></div>
+        <div class="col-12"><label class="form-label" for="f_desc">Descrição do trabalho</label><textarea class="form-control" id="f_desc" name="descricao" rows="4"><?= e($o['descricao'] ?? '') ?></textarea></div>
         <div class="col-md-4"><label class="form-label" for="f_sol">Solicitante</label><input class="form-control" id="f_sol" name="solicitante" maxlength="100" list="l_solic" value="<?= e($o['solicitante'] ?? '') ?>">
           <datalist id="l_solic"><?php foreach (q('SELECT DISTINCT solicitante FROM ordens_trabalho WHERE solicitante IS NOT NULL ORDER BY solicitante LIMIT 100') as $so): ?><option value="<?= e($so['solicitante']) ?>"><?php endforeach; ?></datalist></div>
         <div class="col-md-2"><label class="form-label" for="f_sm">Nº SM</label><input class="form-control" id="f_sm" name="numero_sm" maxlength="20" value="<?= e($o['numero_sm'] ?? '') ?>" title="Número da solicitação de manutenção (papel/planilha)"></div>
-        <div class="col-md-4"><label class="form-label">Responsável</label><?= sel('responsavel_id', $tecnicos, $o['responsavel_id'] ?? null, true, pode('gerir') ? '' : 'disabled') ?></div>
-        <div class="col-md-3"><label class="form-label">Data prevista</label><input type="date" class="form-control" name="data_prevista" value="<?= e($o['data_prevista'] ?? '') ?>"></div>
-        <div class="col-md-2"><label class="form-label">Custo externo (R$)</label><input class="form-control" inputmode="decimal" name="custo_externo" value="<?= num($o['custo_externo'] ?? 0) ?>"></div>
+        <div class="col-md-4"><label class="form-label" for="f_responsavel_id">Responsável</label><?= sel('responsavel_id', $tecnicos, $o['responsavel_id'] ?? null, true, pode('gerir') ? '' : 'disabled') ?></div>
+        <div class="col-md-3"><label class="form-label" for="f_prev">Data prevista</label><input type="date" class="form-control" id="f_prev" name="data_prevista" value="<?= e($o['data_prevista'] ?? '') ?>"></div>
+        <div class="col-md-2"><label class="form-label" for="f_cext">Custo externo (R$)</label><input class="form-control" id="f_cext" inputmode="decimal" name="custo_externo" value="<?= num($o['custo_externo'] ?? 0) ?>"></div>
         <div class="col-md-3 d-flex align-items-end"><div class="form-check"><input class="form-check-input" type="checkbox" name="ativo_parado" value="1" id="ap" <?= !empty($o['ativo_parado']) ? 'checked' : '' ?>>
           <label class="form-check-label" for="ap">Ativo parado (conta indisponibilidade)</label></div></div>
-      </div>
+      </fieldset>
       <button class="btn btn-primary mt-3"><i class="bi bi-check-lg"></i> Salvar</button>
     </form></div></div>
     <?php view_footer(); exit;
@@ -350,7 +388,7 @@ if ($acao === 'form') {
 /* ================= DETALHE / IMPRESSÃO ================= */
 if ($acao === 'ver' || $acao === 'imprimir') {
     $o = ot_carregar((int)get('id'));
-    if (!$o) redirect('ots');
+    if (!$o) { flash('Ordem de trabalho não encontrada.', 'warning'); redirect('ots'); }
     $mo = q('SELECT m.*, t.nome FROM ot_mao_obra m JOIN tecnicos t ON t.id=m.tecnico_id WHERE m.ot_id = ? ORDER BY m.data, m.id', [$o['id']]);
     $mat = q('SELECT m.*, a.codigo, a.descricao, a.unidade, a.estoque_atual FROM ot_materiais m JOIN artigos a ON a.id=m.artigo_id WHERE m.ot_id = ?', [$o['id']]);
     $tar = q('SELECT * FROM ot_tarefas WHERE ot_id = ? ORDER BY ordem, id', [$o['id']]);
@@ -381,7 +419,7 @@ if ($acao === 'ver' || $acao === 'imprimir') {
         <?php endif; ?>
         <?php if (!$aberta && pode('gerir')): ?>
           <form method="post" action="<?= e(url('ots/status')) ?>" data-confirm="Reabrir esta OT?"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $o['id'] ?>">
-            <button class="btn btn-outline-warning btn-sm" name="novo" value="reabrir">Reabrir</button></form>
+            <button class="btn btn-outline-secondary btn-sm" name="novo" value="reabrir" data-confirm="Reabrir esta ordem de trabalho?">Reabrir</button></form>
         <?php endif; ?>
       </div>
     </div>
@@ -424,14 +462,14 @@ if ($acao === 'ver' || $acao === 'imprimir') {
           <?php endforeach; if (!$tar): ?><div class="text-muted small">Sem tarefas.</div><?php endif; ?>
           <?php if ($exec): ?>
             <form method="post" action="<?= e(url('ots/tarefa_add')) ?>" class="input-group input-group-sm mt-2 no-print"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $o['id'] ?>">
-              <input class="form-control" name="descricao" placeholder="Adicionar tarefa…"><button class="btn btn-outline-secondary">+</button></form>
+              <input class="form-control" name="descricao" placeholder="Adicionar tarefa…" aria-label="Nova tarefa"><button class="btn btn-outline-secondary" aria-label="Adicionar tarefa">+</button></form>
           <?php endif; ?>
         </div></div>
 
         <div class="card mb-3" id="maoobra"><div class="card-header bg-white fw-semibold">Mão de obra</div><div class="card-body">
           <div class="table-responsive"><table class="table table-sm"><thead><tr><th>Data</th><th>Técnico</th><th>Horas</th><th class="text-end">Custo</th><th>Obs.</th><th></th></tr></thead><tbody>
           <?php foreach ($mo as $m): ?><tr><td><?= dt($m['data']) ?></td><td><?= e($m['nome']) ?></td><td><?= num($m['horas'], 2) ?></td><td class="text-end"><?= moeda($m['horas'] * $m['custo_hora']) ?></td><td><?= e($m['observacao']) ?></td>
-            <td class="text-end"><?php if ($exec): ?><form method="post" action="<?= e(url('ots/mo_del')) ?>"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $o['id'] ?>"><input type="hidden" name="item_id" value="<?= $m['id'] ?>"><button class="btn btn-link btn-sm text-danger p-0 no-print"><i class="bi bi-x-lg"></i></button></form><?php endif; ?></td></tr>
+            <td class="text-end"><?php if ($exec): ?><form method="post" action="<?= e(url('ots/mo_del')) ?>" data-confirm="Remover este apontamento de horas?"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $o['id'] ?>"><input type="hidden" name="item_id" value="<?= $m['id'] ?>"><button class="btn btn-link btn-sm text-danger p-0 no-print" aria-label="Remover apontamento"><i class="bi bi-x-lg" aria-hidden="true"></i></button></form><?php endif; ?></td></tr>
           <?php endforeach; ?>
           <tr class="fw-semibold"><td colspan="2">Total</td><td><?= num($horasMO, 2) ?> h</td><td class="text-end"><?= moeda($custoMO) ?></td><td colspan="2"></td></tr>
           </tbody></table></div>
@@ -440,8 +478,8 @@ if ($acao === 'ver' || $acao === 'imprimir') {
             <div class="col-md-3"><input type="date" class="form-control form-control-sm" name="data" aria-label="Data do apontamento" max="<?= date('Y-m-d') ?>" value="<?= date('Y-m-d') ?>"></div>
             <div class="col-md-3"><?php if (pode('gerir')): ?><?= sel('tecnico_id', $tecnicos, $u['tecnico_id'] ?? $o['responsavel_id'], true, 'required class="form-select form-select-sm" aria-label="Técnico"') ?>
               <?php else: ?><input type="hidden" name="tecnico_id" value="<?= (int)$u['tecnico_id'] ?>"><input class="form-control form-control-sm" aria-label="Técnico" value="<?= e($tecnicos[$u['tecnico_id']] ?? 'Usuário sem técnico vinculado') ?>" disabled><?php endif; ?></div>
-            <div class="col-md-2"><input class="form-control form-control-sm" inputmode="decimal" name="horas" placeholder="Horas" required></div>
-            <div class="col-md-3"><input class="form-control form-control-sm" name="observacao" placeholder="Observação"></div>
+            <div class="col-md-2"><input class="form-control form-control-sm" inputmode="decimal" name="horas" placeholder="Horas" aria-label="Horas" required></div>
+            <div class="col-md-3"><input class="form-control form-control-sm" name="observacao" placeholder="Observação" aria-label="Observação"></div>
             <div class="col-md-1"><button class="btn btn-sm btn-primary w-100">+</button></div>
           </form>
           <?php endif; ?>
@@ -462,7 +500,7 @@ if ($acao === 'ver' || $acao === 'imprimir') {
           <?php if ($exec): ?>
           <form method="post" action="<?= e(url('ots/mat_add')) ?>" class="row g-2 no-print"><?= csrf_field() ?><input type="hidden" name="id" value="<?= $o['id'] ?>">
             <div class="col-md-8"><?= sel('artigo_id', opcoes("SELECT id, CONCAT(codigo,' · ',descricao,' (saldo ',FORMAT(estoque_atual,2,'pt_BR'),' ',unidade,')') FROM artigos WHERE ativo=1 ORDER BY codigo"), null, true, 'required class="form-select form-select-sm" aria-label="Material"') ?></div>
-            <div class="col-md-2"><input class="form-control form-control-sm" inputmode="decimal" name="quantidade" placeholder="Qtd" required></div>
+            <div class="col-md-2"><input class="form-control form-control-sm" inputmode="decimal" name="quantidade" placeholder="Qtd" aria-label="Quantidade" required></div>
             <div class="col-md-2"><button class="btn btn-sm btn-primary w-100">Requisitar</button></div>
           </form>
           <?php endif; ?>
@@ -505,7 +543,7 @@ if ($acao === 'ver' || $acao === 'imprimir') {
           <?php if (pode('gerir')): ?>
           <form method="post" action="<?= e(url('ots/status')) ?>" class="mt-3" data-confirm="Cancelar esta OT? Materiais baixados voltam ao estoque."><?= csrf_field() ?>
             <input type="hidden" name="id" value="<?= $o['id'] ?>"><input type="hidden" name="novo" value="cancelar">
-            <div class="input-group input-group-sm"><input class="form-control" name="motivo" placeholder="Motivo do cancelamento"><button class="btn btn-outline-danger">Cancelar OT</button></div>
+            <div class="input-group input-group-sm"><input class="form-control" name="motivo" placeholder="Motivo do cancelamento" aria-label="Motivo do cancelamento"><button class="btn btn-outline-danger">Cancelar OT</button></div>
             <?php if ($o['plano_id']): ?><input type="hidden" name="pular_ocorrencia" value="0">
               <div class="form-check small mt-1"><input class="form-check-input" type="checkbox" name="pular_ocorrencia" value="1" id="pul" checked>
               <label class="form-check-label" for="pul">Pular esta ocorrência do plano (reprograma para o próximo período)</label></div><?php endif; ?>
@@ -527,12 +565,14 @@ $t = new Tabela('ots',
     'ordens_trabalho o LEFT JOIN ativos a ON a.id = o.ativo_id LEFT JOIN tecnicos t ON t.id = o.responsavel_id',
     'o.id, o.numero, o.numero_sm, o.tipo, o.area, o.empresa, o.solicitante, o.equipamento, o.patrimonio, o.prioridade, o.status, o.titulo, o.data_abertura, o.data_prevista, o.data_inicio, o.data_fim, o.horas_parada,
      a.codigo AS ativo_codigo, a.nome AS ativo_nome, t.nome AS responsavel, o.custo_mo + o.custo_mat + o.custo_externo AS custo', [
-    'numero' => ['rotulo' => 'Nº', 'ordem' => 'o.id', 'busca' => 'o.numero', 'classe' => 'text-nowrap', 'render' => fn($o) => e($o['numero'])],
+    'numero' => ['rotulo' => 'Nº', 'ordem' => 'o.id', 'busca' => 'o.numero', 'classe' => 'small-xs', 'render' => fn($o) => e($o['numero'])],
     'tipo' => ['rotulo' => 'Tipo', 'ordem' => 'o.tipo', 'classe' => 'd-none d-md-table-cell', 'render' => fn($o) => badge('tipo_ot', $o['tipo']) . ($o['area'] ? '<div class="small text-muted">' . e(explode(' ', rotulo('area', $o['area']))[0]) . '</div>' : ''), 'csv' => fn($o) => rotulo('tipo_ot', $o['tipo'])],
     'titulo' => ['rotulo' => 'Título', 'ordem' => 'o.titulo', 'busca' => 'o.titulo',
-                 'render' => fn($o) => e($o['titulo']) . '<div class="small text-muted d-md-none">' . e($o['ativo_codigo']) . '</div>', 'csv' => fn($o) => $o['titulo']],
+                 'render' => fn($o) => e($o['titulo']) . '<div class="small text-muted d-md-none">' . badge('ot_status', $o['status']) . ' '
+                     . e($o['ativo_codigo'] ?: ($o['patrimonio'] ?: (mb_strtolower((string)$o['equipamento']) === mb_strtolower((string)$o['titulo']) ? '' : mb_strimwidth((string)$o['equipamento'], 0, 40, '…')))) . '</div>', 'csv' => fn($o) => $o['titulo']],
     'ativo' => ['rotulo' => 'Ativo / equipamento', 'ordem' => "COALESCE(a.codigo, o.equipamento)", 'busca' => "CONCAT_WS(' ', a.codigo, a.nome, a.patrimonio, o.equipamento, o.patrimonio, o.solicitante, o.numero_sm, o.empresa)", 'classe' => 'd-none d-md-table-cell',
-                'render' => fn($o) => $o['ativo_codigo'] ? '<span title="' . e($o['ativo_nome']) . '">' . e($o['ativo_codigo']) . '</span>' : '<span class="small">' . e(mb_strimwidth((string)$o['equipamento'], 0, 40, '…')) . '</span>',
+                'render' => fn($o) => ($o['ativo_codigo'] ? '<span title="' . e($o['ativo_nome']) . '">' . e($o['ativo_codigo']) . '</span>' : '<span class="small">' . e(mb_strimwidth((string)$o['equipamento'], 0, 40, '…')) . '</span>')
+                    . ($o['patrimonio'] && !$o['ativo_codigo'] ? '<div class="small text-muted">' . e($o['patrimonio']) . '</div>' : ''),
                 'csv' => fn($o) => trim($o['ativo_codigo'] . ' ' . $o['ativo_nome']) ?: (string)$o['equipamento']],
     'resp' => ['rotulo' => 'Responsável', 'ordem' => 't.nome', 'busca' => 't.nome', 'classe' => 'd-none d-lg-table-cell', 'render' => fn($o) => e($o['responsavel'])],
     'prevista' => ['rotulo' => $f === 'concluidas' ? 'Concluída' : 'Prevista', 'ordem' => $f === 'concluidas' ? 'o.data_fim' : "COALESCE(o.data_prevista, '9999-12-31')",
@@ -540,7 +580,7 @@ $t = new Tabela('ots',
     'prioridade' => ['rotulo' => 'Prioridade', 'ordem' => "FIELD(o.prioridade, 'urgente', 'alta', 'media', 'baixa')", 'classe' => 'd-none d-md-table-cell',
                      'render' => fn($o) => badge('prioridade', $o['prioridade']), 'csv' => fn($o) => rotulo('prioridade', $o['prioridade'])],
     'custo' => ['rotulo' => 'Custo', 'ordem' => '(o.custo_mo + o.custo_mat + o.custo_externo)', 'classe' => 'text-end d-none d-lg-table-cell', 'render' => fn($o) => moeda($o['custo']), 'csv' => fn($o) => num($o['custo'])],
-    'status' => ['rotulo' => 'Status', 'ordem' => 'o.status', 'render' => fn($o) => badge('ot_status', $o['status']), 'csv' => fn($o) => rotulo('ot_status', $o['status'])],
+    'status' => ['rotulo' => 'Status', 'ordem' => 'o.status', 'classe' => 'd-none d-md-table-cell', 'render' => fn($o) => badge('ot_status', $o['status']), 'csv' => fn($o) => rotulo('ot_status', $o['status'])],
     'abertura' => ['rotulo' => 'Abertura', 'csv' => fn($o) => dt($o['data_abertura'], true), 'render' => fn($o) => '', 'classe' => 'd-none'],
     'parada' => ['rotulo' => 'Horas parada', 'csv' => fn($o) => num($o['horas_parada']), 'render' => fn($o) => '', 'classe' => 'd-none'],
     'area' => ['rotulo' => 'Área', 'csv' => fn($o) => $o['area'] ? rotulo('area', $o['area']) : '', 'render' => fn($o) => '', 'classe' => 'd-none'],
@@ -577,6 +617,9 @@ if (is_string($di = get('de')) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $di)) { $t
 if (is_string($df = get('ate')) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $df)) { $t->where[] = 'o.data_abertura < ? + INTERVAL 1 DAY'; $t->params[] = $df; }
 $t->responder('ordens_trabalho');
 
+// filtros em uso: acompanham a troca de aba (Pendentes/Concluídas…) e habilitam o "Limpar filtros"
+$filtrosAtivos = [];
+foreach (['tipo', 'area', 'status', 'empresa', 'origem', 'resp', 'ativo', 'de', 'ate', 'q'] as $fk) if (is_string($fv = get($fk)) && $fv !== '') $filtrosAtivos[$fk] = $fv;
 view_header('Ordens de trabalho', 'ots'); ?>
 <div class="page-title"><h1>Ordens de trabalho</h1>
   <?php if (pode('executar')): ?><a class="btn btn-warning btn-sm" href="<?= e(url('ots/form')) ?>"><i class="bi bi-plus-lg"></i> Nova OT</a><?php endif; ?>
@@ -584,19 +627,26 @@ view_header('Ordens de trabalho', 'ots'); ?>
 <div class="btn-group btn-group-sm mb-2 flex-wrap" role="group" aria-label="Situação">
   <?php foreach (['pendentes' => 'Pendentes', 'atrasadas' => 'Atrasadas', 'minhas' => 'Minhas', 'concluidas' => 'Concluídas', 'todas' => 'Todas'] as $k => $r):
       if ($k === 'minhas' && empty($u['tecnico_id'])) continue; ?>
-    <a class="btn btn-outline-secondary <?= $f === $k ? 'active' : '' ?>" href="<?= e(url('ots', ['f' => $k])) ?>"><?= $r ?></a>
+    <a class="btn btn-outline-secondary <?= $f === $k ? 'active' : '' ?>" <?= $f === $k ? 'aria-current="true"' : '' ?> href="<?= e(url('ots', ['f' => $k] + $filtrosAtivos)) ?>"><?= $r ?></a>
   <?php endforeach; ?>
 </div>
-<form class="card card-body py-2 mb-3" method="get"><input type="hidden" name="r" value="ots"><input type="hidden" name="f" value="<?= e($f) ?>">
-  <div class="row g-2">
-    <div class="col-md-2"><?= sel('tipo', lista_rotulos('tipo_ot'), get('tipo'), true, 'class="form-select form-select-sm" aria-label="Tipo" data-auto-submit', 'Todos os tipos') ?></div>
-    <div class="col-md-2"><?= sel('area', lista_rotulos('area'), get('area'), true, 'class="form-select form-select-sm" aria-label="Área" data-auto-submit', 'Todas as áreas') ?></div>
-    <div class="col-md-2"><?= sel('status', lista_rotulos('ot_status'), get('status'), true, 'class="form-select form-select-sm" aria-label="Status" data-auto-submit', 'Todos os status') ?></div>
-    <div class="col-md-2"><?= sel('empresa', array_combine(ot_empresas(), ot_empresas()) ?: [], get('empresa'), true, 'class="form-select form-select-sm" aria-label="Empresa" data-auto-submit', 'Todas as empresas') ?></div>
-    <div class="col-md-2"><?= sel('origem', ['om' => 'OMs (não preventivas)', 'plano' => 'Preventivas (de plano)'], get('origem'), true, 'class="form-select form-select-sm" aria-label="Origem" data-auto-submit', 'Todas as origens') ?></div>
-    <div class="col-md-2"><?= sel('resp', $tecnicos, get('resp'), true, 'class="form-select form-select-sm" aria-label="Responsável" data-auto-submit', 'Todos os responsáveis') ?></div>
-    <div class="col-6 col-md-1"><input type="date" class="form-control form-control-sm" name="de" value="<?= e(get('de')) ?>" title="Aberta a partir de" aria-label="Aberta a partir de" data-auto-submit></div>
-    <div class="col-6 col-md-1"><input type="date" class="form-control form-control-sm" name="ate" value="<?= e(get('ate')) ?>" title="Aberta até" aria-label="Aberta até" data-auto-submit></div>
+<form class="card card-body py-2 mb-3" method="get" aria-label="Filtros"><input type="hidden" name="r" value="ots"><input type="hidden" name="f" value="<?= e($f) ?>">
+  <?php if ($fa = (int)get('ativo')): ?><input type="hidden" name="ativo" value="<?= $fa ?>"><?php endif; ?>
+  <?php if (isset($filtrosAtivos['q'])): ?><input type="hidden" name="q" value="<?= e($filtrosAtivos['q']) ?>"><?php endif; ?>
+  <div class="row g-2 align-items-end">
+    <div class="col-6 col-md-4 col-xl-2"><?= sel('tipo', lista_rotulos('tipo_ot'), get('tipo'), true, 'class="form-select form-select-sm" aria-label="Tipo" data-auto-submit', 'Todos os tipos') ?></div>
+    <div class="col-6 col-md-4 col-xl-2"><?= sel('area', lista_rotulos('area'), get('area'), true, 'class="form-select form-select-sm" aria-label="Área" data-auto-submit', 'Todas as áreas') ?></div>
+    <div class="col-6 col-md-4 col-xl-2"><?= sel('status', lista_rotulos('ot_status'), get('status'), true, 'class="form-select form-select-sm" aria-label="Status" data-auto-submit', 'Todos os status') ?></div>
+    <div class="col-6 col-md-4 col-xl-2"><?= sel('empresa', array_combine(ot_empresas(), ot_empresas()) ?: [], get('empresa'), true, 'class="form-select form-select-sm" aria-label="Empresa" data-auto-submit', 'Todas as empresas') ?></div>
+    <div class="col-6 col-md-4 col-xl-2"><?= sel('origem', ['om' => 'OTs avulsas (sem plano)', 'plano' => 'Preventivas de plano'], get('origem'), true, 'class="form-select form-select-sm" aria-label="Origem" data-auto-submit', 'Todas as origens') ?></div>
+    <div class="col-6 col-md-4 col-xl-2"><?= sel('resp', $tecnicos, get('resp'), true, 'class="form-select form-select-sm" aria-label="Responsável" data-auto-submit', 'Todos os responsáveis') ?></div>
+    <div class="col-6 col-md-4 col-xl-2"><label class="form-label small text-muted mb-0" for="f_de">Aberta de</label><input type="date" class="form-control form-control-sm" id="f_de" name="de" value="<?= e(is_string(get('de')) ? get('de') : '') ?>"></div>
+    <div class="col-6 col-md-4 col-xl-2"><label class="form-label small text-muted mb-0" for="f_ate">até</label><input type="date" class="form-control form-control-sm" id="f_ate" name="ate" value="<?= e(is_string(get('ate')) ? get('ate') : '') ?>"></div>
+    <div class="col-auto ms-auto d-flex gap-2 align-items-center">
+      <?php if ($fa && ($fan = q1('SELECT codigo, nome FROM ativos WHERE id = ?', [$fa]))): ?><span class="badge text-bg-light border">Ativo: <?= e($fan['codigo']) ?></span><?php endif; ?>
+      <?php if ($filtrosAtivos): ?><a class="btn btn-sm btn-outline-secondary" href="<?= e(url('ots', ['f' => $f])) ?>"><i class="bi bi-x-lg" aria-hidden="true"></i> Limpar filtros</a><?php endif; ?>
+      <button class="btn btn-sm btn-secondary">Filtrar</button>
+    </div>
   </div>
 </form>
 <?= $t->html() ?>

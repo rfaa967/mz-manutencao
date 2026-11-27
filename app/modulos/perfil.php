@@ -11,7 +11,9 @@ if (is_post()) {
     if (login_bloqueado(mb_strtolower($u['email']))) {
         flash('Muitas tentativas. Aguarde 15 minutos.', 'danger');
     } elseif (!password_verify($atual, $u['senha_hash'])) {
-        insert('login_falhas', ['email' => mb_strtolower($u['email']), 'ip' => ip_cliente()]);
+        insert('login_falhas', ['email' => mb_strtolower($u['email']), 'ip' => ip_chave()]);
+        usleep(300000);
+        auditar('senha_falha', 'usuarios', (int)$u['id']);
         flash('Senha atual incorreta.', 'danger');
     } elseif (mb_strlen($nova) < 8) {
         flash('A nova senha precisa ter ao menos 8 caracteres.', 'danger');

@@ -79,12 +79,14 @@ function kpis(string $ini, string $fim, ?array $filtroAtivos = null): array
                COALESCE(SUM(tipo IN (" . TIPOS_PLANEJADOS . ")), 0) planejadas,
                -- falhas, MTBF e MTTR medem confiabilidade de equipamento: só corretivas ligadas a um ativo
                -- (OMs de prédio/instalações e serviços avulsos sem ativo não entram)
-               COALESCE(SUM(tipo = 'corretiva' AND ativo_id IS NOT NULL), 0) corretivas,
+               COALESCE(SUM(tipo = 'corretiva' AND ativo_id IS NOT NULL), 0) falhas,
+               COALESCE(SUM(tipo = 'corretiva'), 0) corretivas,
                AVG(CASE WHEN tipo='corretiva' AND ativo_id IS NOT NULL AND data_inicio IS NOT NULL AND data_fim >= data_inicio THEN TIMESTAMPDIFF(MINUTE, data_inicio, data_fim)/60 END) mttr,
                COALESCE(SUM(" . SQL_CUSTO_OT . "), 0) c_mo, COALESCE(SUM(" . SQL_CUSTO_MAT . "), 0) c_mat, COALESCE(SUM(custo_externo), 0) c_ext
              FROM ordens_trabalho o WHERE status = 'concluida' AND data_fim BETWEEN ? AND ? $fa", $p);
     $k['concluidas'] = (int)$c['total'];
-    $k['corretivas'] = (int)$c['corretivas'];
+    $k['corretivas'] = (int)$c['corretivas'];   // contagem de OTs corretivas (todas)
+    $k['falhas'] = (int)$c['falhas'];           // falhas de equipamento: corretivas ligadas a um ativo (base do MTBF)
     $k['planejadas'] = (int)$c['planejadas'];
     $k['pct_planejada'] = $c['total'] ? $c['planejadas'] / $c['total'] * 100 : null;
     $k['mttr'] = $c['mttr'] !== null ? (float)$c['mttr'] : null;
@@ -117,7 +119,7 @@ function kpis(string $ini, string $fim, ?array $filtroAtivos = null): array
     $k['horas_operacao'] = $horasOp;
     $k['horas_parada'] = $horasOp > 0 ? min($parada, $horasOp) : $parada;
     $k['disponibilidade'] = $horasOp > 0 ? max(0, min(100, ($horasOp - $parada) / $horasOp * 100)) : null;
-    $k['mtbf'] = $k['corretivas'] > 0 && $horasOp > 0 ? max(0, ($horasOp - $paradaCorr) / $k['corretivas']) : null;
+    $k['mtbf'] = $k['falhas'] > 0 && $horasOp > 0 ? max(0, ($horasOp - $paradaCorr) / $k['falhas']) : null;
     return $k;
 }
 

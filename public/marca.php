@@ -2,7 +2,7 @@
 // Logo, favicon e CSS do tema (configurados em Configurações › Aparência). Público: usados também na tela de login.
 declare(strict_types=1);
 require dirname(__DIR__) . '/app/bootstrap.php';
-limitar_cfg('geral_ip', ip_chave());
+limitar('estatico_ip', ip_chave(), 600);   // contador próprio: não consome o limite de páginas do IP (fábrica atrás de NAT)
 
 header('X-Content-Type-Options: nosniff');
 header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox");

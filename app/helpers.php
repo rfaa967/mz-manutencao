@@ -86,9 +86,13 @@ function com_old(?array $registro, array $numericos = [], array $checks = []): a
 }
 
 /* ---------- Entrada ---------- */
-function get(string $k, $padrao = null) { return isset($_GET[$k]) && $_GET[$k] !== '' ? $_GET[$k] : $padrao; }
-function post(string $k, $padrao = null) { return isset($_POST[$k]) ? (is_string($_POST[$k]) ? trim($_POST[$k]) : $_POST[$k]) : $padrao; }
-function post_int(string $k): ?int { $v = post($k); return ($v === null || $v === '') ? null : (int)$v; }
+/** Parâmetro da URL. Arrays (?id[]=1) são tratados como ausentes: nenhuma tela usa parâmetros GET em lista. */
+function get(string $k, $padrao = null) { return isset($_GET[$k]) && is_string($_GET[$k]) && $_GET[$k] !== '' ? $_GET[$k] : $padrao; }
+/** Campo de formulário (texto). Listas (campo[]=) são ignoradas aqui: use post_lista(). */
+function post(string $k, $padrao = null) { return isset($_POST[$k]) && is_string($_POST[$k]) ? trim($_POST[$k]) : $padrao; }
+/** Campo em lista (name="campo[]"): devolve só os itens de texto. */
+function post_lista(string $k): array { return array_values(array_filter((array)($_POST[$k] ?? []), 'is_string')); }
+function post_int(string $k): ?int { $v = post($k); return ($v === null || $v === '' || !is_scalar($v)) ? null : (int)$v; }
 /**
  * Converte número digitado (pt-BR ou com ponto decimal) em float; null se inválido.
  *   "1.234,56" → 1234.56 · "1,5" → 1.5 · "1.500" → 1500 · "0.500" → 0.5 · "10.5" → 10.5
@@ -270,7 +274,8 @@ function lista_rotulos(string $grupo): array { return array_map(fn($x) => $x[0],
 function sel(string $nome, array $opcoes, $atual = null, bool $vazio = true, string $attrs = '', string $rotuloVazio = '— selecione —'): string
 {
     $cls = str_contains($attrs, 'class=') ? '' : 'class="form-select" ';
-    $h = '<select ' . $cls . 'name="' . e($nome) . '" id="f_' . e($nome) . '" ' . $attrs . '>';
+    $id = str_contains($attrs, 'id=') || str_contains($nome, '[') ? '' : 'id="f_' . e($nome) . '" ';   // campo[] repete na tela: sem id   // id próprio em $attrs prevalece (evita id duplicado)
+    $h = '<select ' . $cls . 'name="' . e($nome) . '" ' . $id . $attrs . '>';
     if ($vazio) $h .= '<option value="">' . e($rotuloVazio) . '</option>';
     foreach ($opcoes as $k => $v) {
         $h .= '<option value="' . e($k) . '"' . ((string)$k === (string)$atual ? ' selected' : '') . '>' . e($v) . '</option>';
@@ -291,8 +296,9 @@ function csv_download(string $nome, array $cabecalho, array $linhas): never
     header('Content-Disposition: attachment; filename="' . $nome . '_' . date('Ymd_His') . '.csv"');
     $out = fopen('php://output', 'w');
     fwrite($out, "\xEF\xBB\xBF"); // BOM p/ Excel
-    fputcsv($out, $cabecalho, ';');
-    foreach ($linhas as $l) fputcsv($out, array_map('csv_seguro', array_values($l)), ';');
+    // escape '' (desligado): com o padrão "\\" uma aspa precedida de barra não é duplicada e o valor "vaza" para outra célula
+    fputcsv($out, $cabecalho, ';', '"', '');
+    foreach ($linhas as $l) fputcsv($out, array_map('csv_seguro', array_values($l)), ';', '"', '');
     fclose($out);
     exit;
 }
@@ -383,9 +389,10 @@ function json_out($dados): never
  * Código do bem patrimonial no formato da empresa (ex.: C1.10.016). Aceita as variações digitadas nas
  * planilhas: "C1 10 016", "c1-10.016", "C110016" → "C1.10.016". Outros formatos ficam só em maiúsculas.
  */
-function patrimonio_normalizar(?string $v): ?string
+function patrimonio_normalizar($v): ?string
 {
-    $v = mb_strtoupper(trim((string)$v));
+    if (!is_string($v)) return null;
+    $v = mb_strtoupper(trim($v));
     if ($v === '' || preg_match('/^[-*.\s]+$/', $v)) return null;
     $limpo = preg_replace('/[\s._\-\/]+/', '', $v);
     if (preg_match('/^([A-Z]\d)(\d{2})(\d{3})$/', $limpo, $m)) return "$m[1].$m[2].$m[3]";

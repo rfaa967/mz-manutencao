@@ -115,8 +115,9 @@ Para o e-mail funcionar, preencha o bloco `email` e o `app_url`; sem `app_url` o
 1. Aplique a migração `010_importacao.sql` (`php migrate.php` ou **Configurações › Sistema › Atualizar banco de dados**) e faça backup do banco.
 2. Gere o `.zip` no computador onde está o ManWinWin:
    - **Windows:** copie a pasta `tools/manwinwin` e arraste o `ManWinWin.mdb` sobre `exportar_manwinwin.bat`. O banco é aberto só para leitura; feche o ManWinWin antes. Se aparecer "nenhum driver do Access", instale o *Microsoft Access Database Engine 2016 Redistributable*. Banco com senha: `powershell -ExecutionPolicy Bypass -File exportar_manwinwin.ps1 -Mdb ManWinWin.mdb -Senha SENHA`.
-   - **Linux/macOS:** `tools/manwinwin/exportar_manwinwin.sh ManWinWin.mdb` (precisa de `mdbtools` e `zip`).
-3. Em **Configurações › Importação**, envie o `.zip`, confira a simulação e clique em **Importar agora**. Ou pelo terminal:
+   - **Linux/macOS:** `tools/manwinwin/exportar_manwinwin.sh ManWinWin.mdb` (precisa de `mdbtools`, `python3` e `zip`).
+   - O exportador não leva colunas de senha nem dados pessoais dos funcionários (só código, nome, e-mail, especialidade e custo/hora). Um `.zip` gerado com a versão anterior (≤ 3.3) contém essas colunas: apague-o depois de importar.
+3. Em **Configurações › Importação**, envie o `.zip` (o `.mdb` direto só é aceito pelo terminal), confira a simulação e clique em **Importar agora**. Ou pelo terminal:
    ```bash
    php tools/importar_manwinwin.php manwinwin.zip --detalhes   # simulação, nada é gravado
    php tools/importar_manwinwin.php manwinwin.zip --aplicar    # grava (--incluir-artigos, --incluir-modelo, --usuario=email)
@@ -215,6 +216,14 @@ Não são importados os exemplos "Modelo" (centro de custo 9999, códigos `XX-00
   - arquivos salvos fora da raiz pública com nome aleatório, e o ativo precisa existir;
   - download apenas autenticado, com PDF sempre baixado em vez de aberto no navegador e cabeçalho CSP `sandbox`.
 - Auditoria de ações (tabela `auditoria`), incluindo as falhas de login.
+
+## Auditoria da versão 3.4
+
+Duas rodadas de revisão com revisores independentes (segurança do núcleo, importadores, lógica de negócio e UI/UX/acessibilidade), com os achados corrigidos e testados de novo. Principais mudanças:
+- **Segurança:** bloqueio de login por IP voltou a funcionar (consultava uma coluna inexistente); CSV exportado não executa fórmulas no Excel; limites de memória/tamanho na leitura de `.xlsx` e `.mdb`; o upload web do ManWinWin aceita só `.zip`; senhas e dados pessoais do ManWinWin ficam fora da exportação e da importação; parâmetros em formato de lista (`id[]=`) são ignorados; reautenticação e rate limit por IP tratam IPv6 por prefixo.
+- **Planilhas de OM:** reenviar a planilha atualiza as OMs pendentes que ganharam início/término (antes só entravam linhas novas); abas de rascunho não sobrepõem as abas dos meses; linhas iguais em dias diferentes não são mais unificadas; datas fora do ano da planilha são desconsideradas com aviso.
+- **Lógica:** trocar o ativo de uma OT não mantém o patrimônio do ativo anterior; plano preventivo guarda a data original (`data_plano`, migração 012) e não anda para trás; MTBF/MTTR/falhas contam só corretivas ligadas a ativos; OTs concorrentes (duas abas) não baixam material em OT já encerrada.
+- **UI/UX:** tela móvel mostra equipamento, patrimônio, área e solicitante das OMs; filtros das OTs com "Limpar filtros" e preservados ao trocar de aba; linhas de tabela abrem pelo teclado; alvos de toque de 44 px; contraste corrigido; aviso "Enviando…" nos uploads.
 
 ## Revisão independente
 

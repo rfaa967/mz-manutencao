@@ -66,10 +66,10 @@ function mww_ler_zip(string $caminho): array
             $base = strtolower(basename(str_replace('\\', '/', (string)$st['name'])));
             if (!str_ends_with($base, '.csv') || !isset($nomes[substr($base, 0, -4)])) continue;
             $tab = $nomes[substr($base, 0, -4)];
-            if ((int)$st['size'] > 200 * 1048576) throw new RuntimeException("A tabela $tab passa de 200 MB descompactada.");
+            if ((int)$st['size'] > MWW_MAX_BYTES) throw new RuntimeException("A tabela $tab passa de " . (int)(MWW_MAX_BYTES / 1048576) . ' MB descompactada.');
             $fp = $z->getStream((string)$st['name']);
             if (!$fp) throw new RuntimeException("Não foi possível ler $tab.csv dentro do .zip.");
-            try { $t[$tab] = mww_ler_csv($fp); } finally { fclose($fp); }
+            try { $t[$tab] = mww_ler_csv($fp, $tab); } finally { fclose($fp); }
         }
     } finally {
         $z->close();
@@ -96,29 +96,44 @@ function mww_ler_mdb(string $caminho): array
     $t = [];
     foreach (MWW_TABELAS as $tab) {
         // sem shell: argumentos passados como array (o nome do arquivo não é interpretado)
-        $p = proc_open([$bin, '-T', '%Y-%m-%d %H:%M:%S', '-D', '%Y-%m-%d %H:%M:%S', '-b', 'strip', $caminho, $tab],
-                       [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-        if (!is_resource($p)) throw new RuntimeException('Falha ao executar o mdb-export.');
-        $linhas = mww_ler_csv($pipes[1]);
-        fclose($pipes[1]);
-        $erro = trim((string)stream_get_contents($pipes[2]));
-        fclose($pipes[2]);
-        if (proc_close($p) === 0) $t[$tab] = $linhas;   // tabela inexistente nesta versão do ManWinWin: ignora
+        $cmd = [$bin, '-T', '%Y-%m-%d %H:%M:%S', '-D', '%Y-%m-%d %H:%M:%S', '-b', 'strip', $caminho, $tab];
+        // um .mdb corrompido pode fazer o mdb-export consumir toda a memória: limita a 1 GB e 60 s de CPU
+        if (@is_executable('/usr/bin/prlimit')) array_unshift($cmd, '/usr/bin/prlimit', '--as=1073741824', '--cpu=60');
+        $errArq = tempnam(sys_get_temp_dir(), 'mdb');   // stderr em arquivo: um pipe não lido travaria o processo
+        $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['file', $errArq, 'w']], $pipes);
+        if (!is_resource($p)) { @unlink($errArq); throw new RuntimeException('Falha ao executar o mdb-export.'); }
+        try { $linhas = mww_ler_csv($pipes[1], $tab); }
+        finally { fclose($pipes[1]); $cod = proc_close($p); $erro = trim((string)@file_get_contents($errArq, false, null, 0, 2000)); @unlink($errArq); }
+        if ($cod === 0) $t[$tab] = $linhas;   // tabela inexistente nesta versão do ManWinWin: ignora
         elseif ($tab === 'Objectos') throw new RuntimeException('Não foi possível ler o .mdb: ' . mb_substr($erro, 0, 200));
     }
     return $t;
 }
 
+/** Colunas com senhas/dados pessoais do ManWinWin que a importação não usa: descartadas já na leitura. */
+function mww_coluna_sensivel(string $tabela, string $coluna): bool
+{
+    if (preg_match('/^(snh|senha|pass|pwd)/i', $coluna)) return true;
+    return $tabela === 'Funcionario' && !in_array($coluna, ['CodFunCnr', 'NomFunCnr', 'Email_Fun', 'CodEspCld', 'CstEspCld', 'FlgActivo'], true);
+}
+
+const MWW_MAX_LINHAS = 200000;          // por tabela
+const MWW_MAX_BYTES = 150 * 1048576;    // por tabela, descompactada (o tamanho declarado no zip pode mentir)
+
 /** Lê um CSV (cabeçalho na 1ª linha, aspas duplas, quebras de linha dentro de campos). */
-function mww_ler_csv($fp): array
+function mww_ler_csv($fp, string $tabela = ''): array
 {
     $cab = fgetcsv($fp, 0, ',', '"', '');
     if (!$cab || $cab === [null]) return [];
     $cab[0] = preg_replace('/^\xEF\xBB\xBF/', '', (string)$cab[0]);   // BOM
     $cab = array_map(fn($c) => trim((string)$c), $cab);
+    foreach ($cab as $i => $c) if ($c !== '' && mww_coluna_sensivel($tabela, $c)) $cab[$i] = '';
     $linhas = [];
+    $bytes = 0;
     while (($l = fgetcsv($fp, 0, ',', '"', '')) !== false) {
         if ($l === [null]) continue;
+        foreach ($l as $x) $bytes += strlen((string)$x);
+        if (count($linhas) >= MWW_MAX_LINHAS || $bytes > MWW_MAX_BYTES) throw new RuntimeException("A tabela $tabela é grande demais para importar por aqui (limite de " . MWW_MAX_LINHAS . ' linhas / 150 MB).');
         $r = [];
         foreach ($cab as $i => $c) if ($c !== '') $r[$c] = mww_texto($l[$i] ?? '');
         $linhas[] = $r;
@@ -208,9 +223,19 @@ final class ImportadorManWinWin
         $this->usuarioId = $usuarioId;
     }
 
+    private bool $simulacao = false;
+    private int $seqSim = 0;
+
+    /** Número do documento. Na simulação não toca na tabela de sequências (o UPDATE travaria a criação de OTs dos outros usuários). */
+    private function numero(string $tabela, string $prefixo): string
+    {
+        return $this->simulacao ? sprintf('SIM%s-%06d', $prefixo, ++$this->seqSim) : proximo_numero($tabela, $prefixo);
+    }
+
     /** Executa a importação. $aplicar = false → simulação (tudo é desfeito no final). */
     public function executar(bool $aplicar): array
     {
+        $this->simulacao = !$aplicar;
         if ($aplicar && $this->usuarioId === null) throw new RuntimeException('Informe o usuário responsável pela importação.');
         if ((int)qv("SELECT GET_LOCK('mzmanut_importacao', 0)") !== 1) throw new RuntimeException('Já existe uma importação em andamento. Aguarde e tente de novo.');
         @set_time_limit(0);
@@ -593,7 +618,9 @@ final class ImportadorManWinWin
                     'ativo_id' => $ativoId, 'titulo' => $titulo, 'tipo' => $tipo, 'descricao' => $desc, 'gatilho' => 'tempo',
                     'periodicidade' => $n > 0 ? $n : null, 'unidade_periodo' => $u ?? 'mes', 'base_calculo' => 'fixa',
                     'proxima_data' => $proxima, 'dia_ancora' => $proxima ? (int)substr($proxima, 8, 2) : null,
-                    'ultima_execucao' => $ultimaExec, 'antecedencia_dias' => 7,
+                    'ultima_execucao' => $ultimaExec,
+                    // antecedência menor que a periodicidade (a tela de planos exige; senão cada conclusão já geraria a próxima OT)
+                    'antecedencia_dias' => ($n > 0 && $u) ? max(0, min(7, intdiv(periodo_em_dias($n, $u), 2))) : 7,
                     'responsavel_id' => $this->tecnico((string)($base['CodFunCnr'] ?? '')),
                     'prioridade' => self::prioridade($base['CriOrdClb'] ?? null),
                     'duracao_estimada' => ($duracao !== null && $duracao > 0 && $duracao < 10000) ? $duracao : null, 'ativo' => $ativo,
@@ -639,8 +666,10 @@ final class ImportadorManWinWin
             $abertura = mww_data($c['DatEmiClb'] ?? '') ?? mww_data($c['DatOrdClb'] ?? '') ?? mww_data($c['DatProClb'] ?? '') ?? date('Y-m-d H:i:s');
             $prevista = mww_dia($c['DatProClb'] ?? '') ?? mww_dia($c['DatIniClb'] ?? '');
             $fim = $fechada ? (mww_data($c['DatFimClb'] ?? '') ?? mww_data($c['DatEncClb'] ?? '')) : null;
+            if ($fechada && !$cancelada && !$fim) $fim = $abertura;   // fechada só pelo código de situação: sem data de fim ela sumiria dos relatórios
             $inicio = $fechada ? (mww_data($c['DatIniClb'] ?? '') ?? $fim) : null;
             if ($inicio && $fim && $inicio > $fim) $inicio = $fim;
+            if ($fim && $abertura > $fim) $abertura = $inicio ?? $fim;
 
             $esp = $this->especNome((string)($c['CodEspCld'] ?? ''));
             if ($esp) $this->especialidade((string)$c['CodEspCld']);
@@ -660,11 +689,12 @@ final class ImportadorManWinWin
 
             $this->obter('ordens_trabalho', $num, $rotulo, null, function () use ($c, $ativoId, $planoId, $tipo, $status, $titulo, $desc, $abertura, $prevista, $inicio, $fim, $sol, $custo, $causa, $tarefas, $fechada) {
                 $id = insert('ordens_trabalho', [
-                    'numero' => proximo_numero('ordens_trabalho', 'OT'), 'ativo_id' => $ativoId, 'plano_id' => $planoId,
+                    'numero' => $this->numero('ordens_trabalho', 'OT'), 'ativo_id' => $ativoId, 'plano_id' => $planoId,
                     'tipo' => $tipo, 'prioridade' => self::prioridade(($c['CriOrdClb'] ?? '') ?: ($c['PriOrdClb'] ?? null)),
                     'status' => $status, 'titulo' => $titulo, 'descricao' => $desc,
                     'responsavel_id' => $this->tecnico((string)($c['CodFunCnr'] ?? '')),
                     'data_abertura' => $abertura, 'data_prevista' => $prevista, 'data_inicio' => $inicio, 'data_fim' => $fim,
+                    'data_plano' => $planoId && $prevista ? substr((string)$prevista, 0, 10) : null,   // adiar a OT depois não desloca o plano
                     'causa_falha' => $causa !== '' ? self::cortar(($this->causas[$causa] ?? '') ?: $causa, 150) : null,
                     'solucao' => $sol ? implode("\n\n", $sol) : null, 'custo_externo' => round($custo, 2),
                     'criado_por' => $this->usuarioId,
@@ -701,7 +731,7 @@ final class ImportadorManWinWin
                    . (($p['StaPedTrb'] ?? '') !== '' ? ' (situação ' . $p['StaPedTrb'] . ')' : '') . '.';
             $this->obter('pedidos', $num, $rotulo, null, function () use ($p, $ativoId, $otId, $solic, $titulo, $desc) {
                 $id = insert('pedidos', [
-                    'numero' => proximo_numero('pedidos', 'PT'), 'ativo_id' => $ativoId, 'solicitante_id' => $solic,
+                    'numero' => $this->numero('pedidos', 'PT'), 'ativo_id' => $ativoId, 'solicitante_id' => $solic,
                     'titulo' => $titulo, 'descricao' => $desc, 'prioridade' => self::prioridade($p['PriPedTrb'] ?? null),
                     'status' => $otId ? 'convertido' : 'aberto', 'ot_id' => $otId,
                     'criado_em' => mww_data($p['DatPedTrb'] ?? '') ?? date('Y-m-d H:i:s'),

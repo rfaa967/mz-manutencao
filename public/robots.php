@@ -2,7 +2,7 @@
 // /robots.txt (reescrito para cá pelo .htaccess; no Nginx: location = /robots.txt { rewrite ^ /robots.php last; })
 declare(strict_types=1);
 require dirname(__DIR__) . '/app/bootstrap.php';
-limitar_cfg('geral_ip', ip_chave());
+limitar('estatico_ip', ip_chave(), 600);   // contador próprio: não consome o limite de páginas do IP (fábrica atrás de NAT)
 header('Content-Type: text/plain; charset=utf-8');
 header('Cache-Control: public, max-age=3600');
 // Mesmo com indexação liberada, as áreas internas exigem login; só a tela de entrada fica visível aos buscadores.
